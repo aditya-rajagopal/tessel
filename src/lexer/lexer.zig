@@ -27,99 +27,111 @@ pub const Lexer = struct {
         return l;
     }
 
+    /// Handy debug function to print a token to stderr
+    pub fn print_token(self: *Lexer, tok: token.Token, source: []const u8) void {
+        std.debug.print("{s}: {s:<15}| {s}\n", .{ source, @tagName(tok.type), self.input[tok.loc.start..tok.loc.end] });
+    }
+
     /// Parses the current string being read in the lexer and returns a token based on
     /// the language rules
     ///
     /// TODO(aditya): Make the rules something you can define elsewhere and pass to the lexer
     pub fn next_token(self: *Lexer) token.Token {
         self.skip_white_spaces();
-        const tok = switch (self.ch_current) {
-            '=' => eq_tok: {
+        var tok = token.Token{ .type = .EOF, .loc = .{ .start = self.position, .end = undefined } };
+        switch (self.ch_current) {
+            '=' => {
                 const ch = self.peak_next_character();
                 switch (ch) {
                     '=' => {
                         self.read_next_character();
-                        break :eq_tok token.Token.init(.EQ, self.input[self.position - 1 .. self.position + 1]);
+                        tok.type = .EQ;
                     },
-                    inline else => break :eq_tok token.Token.init(.ASSIGN, self.input[self.position .. self.position + 1]),
+                    else => {
+                        tok.type = .ASSIGN;
+                    },
                 }
             },
-            '+' => token.Token.init(.PLUS, self.input[self.position .. self.position + 1]),
-            '-' => token.Token.init(.MINUS, self.input[self.position .. self.position + 1]),
-            '!' => bang_tok: {
+            '+' => tok.type = .PLUS,
+            '-' => tok.type = .MINUS,
+            '!' => {
                 const ch = self.peak_next_character();
                 switch (ch) {
                     '=' => {
                         self.read_next_character();
-                        break :bang_tok token.Token.init(.NEQ, self.input[self.position - 1 .. self.position + 1]);
+                        tok.type = .NEQ;
                     },
-                    inline else => break :bang_tok token.Token.init(.BANG, self.input[self.position .. self.position + 1]),
+                    inline else => tok.type = .BANG,
                 }
             },
-            '*' => token.Token.init(.ASTRIX, self.input[self.position .. self.position + 1]),
-            '/' => slash_tok: {
+            '*' => tok.type = .ASTRIX,
+            '/' => {
                 const ch = self.peak_next_character();
                 switch (ch) {
                     '/' => {
                         // Skip comments
                         self.read_until('\n');
-                        const tok = self.next_token();
+                        const t = self.next_token();
+                        tok.type = t.type;
+                        tok.loc = t.loc;
                         return tok;
                     },
-                    else => break :slash_tok token.Token.init(.SLASH, self.input[self.position .. self.position + 1]),
+                    else => tok.type = .SLASH,
                 }
             },
-            '<' => lt_tok: {
+            '<' => {
                 const ch = self.peak_next_character();
                 switch (ch) {
                     '=' => {
                         self.read_next_character();
-                        break :lt_tok token.Token.init(.LTE, self.input[self.position - 1 .. self.position + 1]);
+                        tok.type = .LTE;
                     },
-                    inline else => break :lt_tok token.Token.init(.LT, self.input[self.position .. self.position + 1]),
+                    inline else => tok.type = .LT,
                 }
             },
-            '>' => gt_tok: {
+            '>' => {
                 const ch = self.peak_next_character();
                 switch (ch) {
                     '=' => {
                         self.read_next_character();
-                        break :gt_tok token.Token.init(.GTE, self.input[self.position - 1 .. self.position + 1]);
+                        tok.type = .GTE;
                     },
-                    else => break :gt_tok token.Token.init(.GT, self.input[self.position .. self.position + 1]),
+                    else => tok.type = .GT,
                 }
             },
 
-            '(' => token.Token.init(.LPAREN, self.input[self.position .. self.position + 1]),
-            ')' => token.Token.init(.RPAREN, self.input[self.position .. self.position + 1]),
-            '{' => token.Token.init(.LBRACE, self.input[self.position .. self.position + 1]),
-            '}' => token.Token.init(.RBRACE, self.input[self.position .. self.position + 1]),
-            ',' => token.Token.init(.COMMA, self.input[self.position .. self.position + 1]),
-            ';' => token.Token.init(.SEMICOLON, self.input[self.position .. self.position + 1]),
-            0 => token.Token.init(.EOF, ""),
-            else => |ch| else_tok: {
+            '(' => tok.type = .LPAREN,
+            ')' => tok.type = .RPAREN,
+            '{' => tok.type = .LBRACE,
+            '}' => tok.type = .RBRACE,
+            ',' => tok.type = .COMMA,
+            ';' => tok.type = .SEMICOLON,
+            0 => {
+                tok.loc.end = self.position;
+                return tok;
+            },
+            else => |ch| {
                 if (is_letter(ch)) {
-                    var t: token.Token = undefined;
-                    const start_pos = self.position;
+                    tok.loc.start = self.position;
                     self.read_identifier();
-                    t.literal = self.input[start_pos..self.position];
-                    t.type = token.Keywords.get(t.literal) orelse .IDENT;
-                    return t;
+                    tok.loc.end = self.position;
+                    tok.type = token.Keywords.get(self.input[tok.loc.start..tok.loc.end]) orelse .IDENT;
+                    return tok;
                 } else {
                     if (is_digit(ch)) {
-                        var t: token.Token = undefined;
-                        const start_pos = self.position;
-                        self.read_number_literal();
-                        t.literal = self.input[start_pos..self.position];
-                        t.type = .INT;
-                        return t;
+                        tok.loc.start = self.position;
+                        const is_float = self.read_number_literal();
+                        tok.loc.end = self.position;
+                        tok.type = if (is_float) .FLOAT else .INT;
+                        return tok;
                     } else {
-                        break :else_tok token.Token.init(.ILLEGAL, self.input[self.position .. self.position + 1]);
+                        tok.type = .ILLEGAL;
                     }
                 }
             },
-        };
+        }
         self.read_next_character();
+        tok.loc.end = self.position;
         return tok;
     }
 
@@ -131,7 +143,7 @@ pub const Lexer = struct {
         std.debug.assert(tokens.items.len == 0);
         self.reset_lexer();
 
-        const tok = self.next_token();
+        var tok = self.next_token();
         while (tok.type != .EOF) : (tok = self.next_token()) {
             try tokens.append(tok);
         }
@@ -150,10 +162,10 @@ pub const Lexer = struct {
         try stdout.print("{s:<15}|{s}\n", .{ "Token.TokenType", "[]u8 literal" });
         try stdout.print("{s:<15}*{s}\n", .{ "-" ** 15, "-" ** 15 });
         while (tok.type != .EOF) : (tok = self.next_token()) {
-            try stdout.print("{s:<15}| {s}\n", .{ @tagName(tok.type), tok.literal });
+            try stdout.print("{s:<15}| {s}\n", .{ @tagName(tok.type), self.input[tok.loc.start..tok.loc.end] });
             try stdout.print("{s:<15}*{s}\n", .{ "-" ** 15, "-" ** 15 });
         }
-        try stdout.print("{s:<15}| {s}\n", .{ @tagName(tok.type), tok.literal });
+        try stdout.print("{s:<15}| {s}\n", .{ @tagName(tok.type), "" });
         try stdout.print("{s:<15}*{s}\n", .{ "-" ** 15, "-" ** 15 });
         self.reset_lexer();
     }
@@ -207,16 +219,21 @@ pub const Lexer = struct {
 
     /// Moves our read pointers forward till we have consumed and identifier
     fn read_identifier(self: *Lexer) void {
-        while (is_letter(self.ch_current)) {
+        while (is_letter(self.ch_current) or is_digit(self.ch_current)) {
             self.read_next_character();
         }
     }
 
     /// Moves our read pointer forward untill we have consumed a numerical literal
-    fn read_number_literal(self: *Lexer) void {
-        while (is_digit(self.ch_current)) {
+    fn read_number_literal(self: *Lexer) bool {
+        var is_float = false;
+        while (is_digit(self.ch_current) or self.ch_current == '.') {
+            if (self.ch_current == '.') {
+                is_float = true;
+            }
             self.read_next_character();
         }
+        return is_float;
     }
 
     fn skip_white_spaces(self: *Lexer) void {
@@ -230,7 +247,7 @@ pub const Lexer = struct {
 test "test_lexing" {
     const input =
         \\ const five = 5;
-        \\ var ten = 10;
+        \\ var ten = 10.5;
         \\
         \\ const add = fn(x, y) {
         \\     x + y;
@@ -240,7 +257,7 @@ test "test_lexing" {
         \\ !-/*5;
         \\ 5 < 10 > 5;
         \\
-        \\ if ( 5 < 10 ) {
+        \\ if ( 5 < 10.5 ) {
         \\     return true;
         \\ } else {
         \\     return false; // This is also a comment that should be skipped
@@ -266,7 +283,7 @@ test "test_lexing" {
         .{ .expectedType = .VAR, .expectedLiteral = "var" },
         .{ .expectedType = .IDENT, .expectedLiteral = "ten" },
         .{ .expectedType = .ASSIGN, .expectedLiteral = "=" },
-        .{ .expectedType = .INT, .expectedLiteral = "10" },
+        .{ .expectedType = .FLOAT, .expectedLiteral = "10.5" },
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
         .{ .expectedType = .CONST, .expectedLiteral = "const" },
         .{ .expectedType = .IDENT, .expectedLiteral = "add" },
@@ -310,7 +327,7 @@ test "test_lexing" {
         .{ .expectedType = .LPAREN, .expectedLiteral = "(" },
         .{ .expectedType = .INT, .expectedLiteral = "5" },
         .{ .expectedType = .LT, .expectedLiteral = "<" },
-        .{ .expectedType = .INT, .expectedLiteral = "10" },
+        .{ .expectedType = .FLOAT, .expectedLiteral = "10.5" },
         .{ .expectedType = .RPAREN, .expectedLiteral = ")" },
         .{ .expectedType = .LBRACE, .expectedLiteral = "{" },
         .{ .expectedType = .RETURN, .expectedLiteral = "return" },
@@ -345,7 +362,8 @@ test "test_lexing" {
 
     for (tests) |t| {
         const tok = lex.next_token();
+        // lex.print_token(tok, "lexer test");
         try testing.expectEqual(t.expectedType, tok.type);
-        try testing.expectEqualStrings(t.expectedLiteral, tok.literal);
+        try testing.expectEqualStrings(t.expectedLiteral, lex.input[tok.loc.start..tok.loc.end]);
     }
 }

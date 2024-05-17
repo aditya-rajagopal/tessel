@@ -63,18 +63,10 @@ pub const Token = struct {
     /// Type of token
     type: TokenType,
     /// The string literal that the token represents
-    literal: []const u8,
+    loc: Location,
 
-    /// Utility to initialize a token
-    pub fn init(token_type: TokenType, token_literal: []const u8) Token {
-        return .{ .type = token_type, .literal = token_literal };
-    }
+    pub const Location = struct { start: usize, end: usize };
 };
-
-/// Handy debug function to print a token to stderr
-pub fn token_debug_print(tok: Token, source: []const u8) void {
-    std.debug.print("{s}: {s:<15}| {s}\n", .{ source, @tagName(tok.type), tok.literal });
-}
 
 test "keywords" {
     var func = Keywords.get("fn") orelse .IDENT;
