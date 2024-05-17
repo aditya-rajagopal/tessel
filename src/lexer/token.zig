@@ -1,6 +1,6 @@
-// pub const TokenType = ?[*:0]u8;
 const std = @import("std");
 
+/// Contains all the types of token currently accepted by the language
 pub const TokenType = enum {
     ILLEGAL,
     EOF,
@@ -46,6 +46,7 @@ pub const TokenType = enum {
     FALSE,
 };
 
+/// Map of all valid keywords in tessel created at compiletime
 pub const Keywords = std.ComptimeStringMap(TokenType, .{
     .{ "fn", .FUNCTION },
     .{ "const", .CONST },
@@ -57,14 +58,23 @@ pub const Keywords = std.ComptimeStringMap(TokenType, .{
     .{ "false", .FALSE },
 });
 
+/// Storage structure for tokens
 pub const Token = struct {
+    /// Type of token
     type: TokenType,
+    /// The string literal that the token represents
     literal: []const u8,
 
+    /// Utility to initialize a token
     pub fn init(token_type: TokenType, token_literal: []const u8) Token {
         return .{ .type = token_type, .literal = token_literal };
     }
 };
+
+/// Handy debug function to print a token to stderr
+pub fn token_debug_print(tok: Token, source: []const u8) void {
+    std.debug.print("{s}: {s:<15}| {s}\n", .{ source, @tagName(tok.type), tok.literal });
+}
 
 test "keywords" {
     var func = Keywords.get("fn") orelse .IDENT;

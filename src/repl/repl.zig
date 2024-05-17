@@ -1,8 +1,13 @@
 const std = @import("std");
 const lexer = @import("../lexer/lexer.zig");
+
+/// The text to be displayed when accepting a new statement
 const PROMT = ">> ";
+
+/// The command that will trigger the end of the REPL
 const EXIT = "exit";
 
+/// Function that starts the REPL. It creates a stdout/in reader/writer and connects the the lexer
 pub fn start() !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
