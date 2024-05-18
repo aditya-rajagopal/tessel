@@ -1,6 +1,7 @@
 const std = @import("std");
-const lexer = @import("../lexer/lexer.zig");
+const lexer = @import("../tessel/lexer.zig");
 
+pub const REPL = @This();
 /// The text to be displayed when accepting a new statement
 const PROMT = ">> ";
 
@@ -21,6 +22,14 @@ pub fn start() !void {
     try stdout.print("Feel free to type commands here at your own risk\n", .{});
     try stdout.print("Type \"exit\" without the quotes to quit or Ctrl+c \n", .{});
     try bw.flush();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) {
+            @panic("memory leak");
+        }
+    }
 
     while (true) {
         try stdout.print("{s}", .{PROMT});
@@ -28,14 +37,21 @@ pub fn start() !void {
 
         var msg_buf: [10240]u8 = undefined;
         const msg = try stdin.readUntilDelimiterOrEof(&msg_buf, '\n');
-
         if (msg) |m| {
+            if (m.len == 0) {
+                continue;
+            }
             const cmp = std.mem.eql(u8, EXIT, m[0 .. m.len - 1]);
             if (cmp) {
                 try stdout.print("Tessel is exiting", .{});
                 break;
             }
-            var lex = lexer.Lexer.init(m);
+            var source_code = try allocator.alloc(u8, m.len + 1);
+            defer allocator.free(source_code);
+            @memcpy(source_code, m.ptr);
+            source_code[m.len] = 0;
+
+            var lex = lexer.init(source_code[0..m.len :0]);
             try lex.print_debug_tokens(stdout);
             try bw.flush();
         }
