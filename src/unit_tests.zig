@@ -1,4 +1,5 @@
 comptime {
-    _ = @import("lexer/lexer.zig");
-    _ = @import("lexer/token.zig");
+    _ = @import("tessel/lexer.zig");
+    _ = @import("tessel/token.zig");
+    _ = @import("tessel/parser.zig");
 }

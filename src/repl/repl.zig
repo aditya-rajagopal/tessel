@@ -1,12 +1,10 @@
-const std = @import("std");
-const lexer = @import("../tessel/lexer.zig");
-
 pub const REPL = @This();
 /// The text to be displayed when accepting a new statement
 const PROMT = ">> ";
 
 /// The command that will trigger the end of the REPL
-const EXIT = "exit";
+const EXIT = "exit()";
+// const CLEAR = "clear()";
 
 /// Function that starts the REPL. It creates a stdout/in reader/writer and connects the the lexer
 pub fn start() !void {
@@ -18,9 +16,7 @@ pub fn start() !void {
     var buf_reader = std.io.bufferedReader(stdin_file);
     const stdin = buf_reader.reader();
 
-    try stdout.print("Welcome to tessel.\n", .{});
-    try stdout.print("Feel free to type commands here at your own risk\n", .{});
-    try stdout.print("Type \"exit\" without the quotes to quit or Ctrl+c \n", .{});
+    try print_header(stdout);
     try bw.flush();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -37,13 +33,15 @@ pub fn start() !void {
 
         var msg_buf: [10240]u8 = undefined;
         const msg = try stdin.readUntilDelimiterOrEof(&msg_buf, '\n');
+
         if (msg) |m| {
-            if (m.len == 0) {
+            if (m.len == 1 and m[0] == '\r') {
                 continue;
             }
-            const cmp = std.mem.eql(u8, EXIT, m[0 .. m.len - 1]);
-            if (cmp) {
+            const exit_cmp = std.mem.eql(u8, EXIT, m[0 .. m.len - 1]);
+            if (exit_cmp) {
                 try stdout.print("Tessel is exiting", .{});
+                try bw.flush();
                 break;
             }
             var source_code = try allocator.alloc(u8, m.len + 1);
@@ -57,3 +55,14 @@ pub fn start() !void {
         }
     }
 }
+
+fn print_header(stdout: anytype) !void {
+    // try stdout.print("\x1b[2J", .{});
+    try stdout.print("Welcome to tessel.\n", .{});
+    try stdout.print("Feel free to type commands here at your own risk\n", .{});
+    try stdout.print("Type \"exit()\" without the quotes to quit or Ctrl+c \n", .{});
+    // try stdout.print("Type \"clear()\" without the quotes to clear the screen \n", .{});
+}
+
+const std = @import("std");
+const lexer = @import("../tessel/lexer.zig");

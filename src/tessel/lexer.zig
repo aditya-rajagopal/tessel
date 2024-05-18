@@ -1,11 +1,6 @@
-const std = @import("std");
-const print = std.debug.print;
-const testing = std.testing;
-
-pub const token = @import("token.zig");
-
 /// A utility to hold a string of data and allows you to tokenize a provided string
 pub const Lexer = @This();
+
 /// Storage for the data we want to create tokens for
 ///
 /// This is not meant to be accessed directly and it is to be provided when
@@ -371,3 +366,9 @@ test "test_lexing" {
         try testing.expectEqualStrings(t.expectedLiteral, lex.input[tok.loc.start..tok.loc.end]);
     }
 }
+
+const std = @import("std");
+const print = std.debug.print;
+const testing = std.testing;
+
+pub const token = @import("token.zig");
