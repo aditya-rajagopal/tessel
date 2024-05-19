@@ -48,6 +48,8 @@ pub const Node = struct {
         IDENTIFIER,
         /// Has no child data nodes
         INTEGER_LITERAL,
+        /// Has no child data nodes
+        BOOLEAN_LITERAL,
         /// ! lhs. rhs is empty.
         BOOL_NOT,
         /// - lhs. rhs is empty

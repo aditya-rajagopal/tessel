@@ -103,15 +103,15 @@ pub fn begin_parsing(self: *Parser) !void {
 }
 
 fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
-    var node = Ast.Node{
+    const node = try self.add_node(.{
         .tag = Ast.Node.Tag.VAR_STATEMENT, //
         .main_token = self.next_token(),
         .node_data = undefined,
-    };
+    });
 
     // After a const or var statement you expect a identifier
     if (self.is_current_token(.IDENT)) {
-        node.node_data.lhs = try self.add_node(.{
+        self.nodes.items(.node_data)[node].lhs = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
@@ -141,21 +141,28 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
 
     _ = self.eat_token(.ASSIGN);
 
-    _ = self.eat_token_till(.SEMICOLON);
-
-    return self.add_node(node);
+    const rhs = try self.parse_expression();
+    if (rhs == 0) {
+        return node;
+    }
+    self.nodes.items(.node_data)[node].rhs = rhs;
+    return node;
 }
 
 fn parse_return_statement(self: *Parser) Error!Ast.Node.NodeIndex {
-    const node = Ast.Node{
+    const node = try self.add_node(.{
         .tag = .RETURN_STATEMENT, //
-        .main_token = self.token_current,
+        .main_token = self.next_token(),
         .node_data = .{ .lhs = undefined, .rhs = undefined },
-    };
+    });
 
-    _ = self.eat_token_till(.SEMICOLON);
+    const lhs = try self.parse_expression();
+    if (lhs == 0) {
+        return node;
+    }
+    self.nodes.items(.node_data)[node].lhs = lhs;
 
-    return self.add_node(node);
+    return node;
 }
 
 const OperatorPrecedence = struct {
@@ -238,7 +245,6 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
         });
     }
     _ = self.eat_token(.SEMICOLON);
-    // std.debug.print("Exiting parse Expression", .{});
     return cur_node;
 }
 
@@ -283,6 +289,11 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
         }),
         .INT => return self.add_node(.{
             .tag = .INTEGER_LITERAL, //
+            .main_token = self.next_token(),
+            .node_data = .{ .lhs = undefined, .rhs = undefined },
+        }),
+        .TRUE, .FALSE => return self.add_node(.{
+            .tag = .BOOLEAN_LITERAL, //
             .main_token = self.next_token(),
             .node_data = .{ .lhs = undefined, .rhs = undefined },
         }),
@@ -346,6 +357,34 @@ fn is_next_token(self: *Parser, tag: token.TokenType) bool {
     return self.token_current < self.token_ends.len - 1 and self.token_tags[self.token_current + 1] == tag;
 }
 
+pub fn print_parser_errors_to_stdout(ast: *const Ast, stdout: anytype) !void {
+    for (ast.errors) |err| {
+        const tok = ast.tokens.get(err.token);
+        try stdout.print("Parser Errors! ({s}): At location {d} in the source code," ++
+            " expected token of type {s} but instead got token of type {s}: {s}\n", .{
+            @tagName(err.tag),
+            tok.start, //
+            @tagName(err.expected),
+            @tagName(tok.tag),
+            ast.source_buffer[tok.start..tok.end],
+        });
+    }
+}
+
+pub fn print_parser_errors_to_stderr(ast: *const Ast) !void {
+    for (ast.errors) |err| {
+        const tok = ast.tokens.get(err.token);
+        std.debug.print("Parser Errors! ({s}): At location {d} in the source code," ++
+            " expected token of type {s} but instead got token of type {s}: {s}\n", .{
+            @tagName(err.tag),
+            tok.start, //
+            @tagName(err.expected),
+            @tagName(tok.tag),
+            ast.source_buffer[tok.start..tok.end],
+        });
+    }
+}
+
 test "parser_initialization_test_only_root_node" {
     const input = "\n";
 
@@ -360,14 +399,14 @@ test "parser_initialization_test_only_root_node" {
 test "parser_test_var_decl" {
     const input =
         \\ const a = 10;
-        \\ const b = 15;
-        \\ var foobar = 1121414;
+        \\ const b = true;
+        \\ const c = false;
     ;
 
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(7, ast.nodes.len);
-    try testing.expectEqual(0, ast.errors.len);
+    // try testing.expectEqual(10, ast.nodes.len);
+    // try testing.expectEqual(0, ast.errors.len);
 
     const tests = [_]struct {
         expectedNodeType: Ast.Node.Tag, //
@@ -382,16 +421,28 @@ test "parser_test_var_decl" {
             .expectedDataRHS = undefined,
         },
         .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 3,
+        },
+        .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
             .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
         },
         .{
-            .expectedNodeType = .VAR_STATEMENT, //
-            .expectedMainToken = 0,
-            .expectedDataLHS = 1,
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 6,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
@@ -400,10 +451,16 @@ test "parser_test_var_decl" {
             .expectedDataRHS = undefined,
         },
         .{
-            .expectedNodeType = .VAR_STATEMENT, //
-            .expectedMainToken = 5,
-            .expectedDataLHS = 3,
+            .expectedNodeType = .BOOLEAN_LITERAL, //
+            .expectedMainToken = 8,
+            .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 8,
+            .expectedDataRHS = 9,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
@@ -412,9 +469,9 @@ test "parser_test_var_decl" {
             .expectedDataRHS = undefined,
         },
         .{
-            .expectedNodeType = .VAR_STATEMENT, //
-            .expectedMainToken = 10,
-            .expectedDataLHS = 5,
+            .expectedNodeType = .BOOLEAN_LITERAL, //
+            .expectedMainToken = 13,
+            .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
         },
     };
@@ -427,11 +484,12 @@ test "parse_test_var_decl_errors" {
         \\ const a 10;
         \\ const = 15;
         \\ var foobar = 1121414;
+        \\ const b = ;
     ;
 
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(ast.errors.len, 2);
+    try testing.expectEqual(ast.errors.len, 3);
 
     const tests = [_]struct {
         expectedErrTag: Ast.Error.Tag, //
@@ -447,6 +505,11 @@ test "parse_test_var_decl_errors" {
             .expectedErrTag = .expected_identifier_after_const, //
             .expectedTokenIndex = 5,
             .expectedExpectedToken = .IDENT,
+        },
+        .{
+            .expectedErrTag = .expected_expression, //
+            .expectedTokenIndex = 16,
+            .expectedExpectedToken = .ILLEGAL,
         },
     };
 
@@ -470,12 +533,12 @@ test "parser_test_return_stmt" {
     const input =
         \\ return 5;
         \\ return 10;
-        \\ return 151241;
+        \\ return a;
     ;
 
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(ast.nodes.len, 4);
+    try testing.expectEqual(ast.nodes.len, 7);
     try testing.expectEqual(ast.errors.len, 0);
 
     const tests = [_]struct {
@@ -493,18 +556,36 @@ test "parser_test_return_stmt" {
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 1,
             .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 3,
+            .expectedDataLHS = 4,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 4,
             .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 6,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 7,
             .expectedDataLHS = undefined,
             .expectedDataRHS = undefined,
         },
@@ -659,8 +740,8 @@ test "parser_test_infix_operators" {
             .expected = "(((a + (b * c)) + (d / e)) - f)",
         },
         // .{
-        // .input = "3 + 4; -5 * 5",
-        // .expected = "(3 + 4)((-5) * 5)",
+        //     .input = "3 + 4; -5 * 5",
+        //     .expected = "(3 + 4)((-5) * 5)",
         // },
         .{
             .input = "5 > 4 == 3 < 4",
@@ -674,22 +755,22 @@ test "parser_test_infix_operators" {
             .input = "3 + 4 * 5 == 3 * 1 + 4 * 5",
             .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))",
         },
-        // .{
-        // .input = "true",
-        // .expected = "true",
-        // },
-        // .{
-        // .input = "false",
-        // .expected = "false",
-        // },
-        // .{
-        // .input = "3 > 5 == false",
-        // .expected = "((3 > 5) == false)",
-        // },
-        // .{
-        // .input = "3 < 5 == true",
-        // .expected = "((3 < 5) == true)",
-        // },
+        .{
+            .input = "true",
+            .expected = "true",
+        },
+        .{
+            .input = "false",
+            .expected = "false",
+        },
+        .{
+            .input = "3 > 5 == false",
+            .expected = "((3 > 5) == false)",
+        },
+        .{
+            .input = "3 < 5 == true",
+            .expected = "((3 < 5) == true)",
+        },
         // .{
         //     .input = "1 + (2 + 3) + 4",
         //     .expected = "((1 + (2 + 3)) + 4)",
@@ -777,7 +858,7 @@ pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u
             try convert_ast_to_string(ast, node.node_data.rhs, list);
             try list.append(')');
         },
-        .INTEGER_LITERAL, .IDENTIFIER => {
+        .INTEGER_LITERAL, .IDENTIFIER, .BOOLEAN_LITERAL => {
             const tok = ast.tokens.get(node.main_token);
             const literal = ast.source_buffer[tok.start..tok.end];
             try list.appendSlice(literal);

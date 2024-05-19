@@ -51,9 +51,9 @@ pub fn start() !void {
 
             var ast = try Parser.parse_program(source_code[0..m.len :0], allocator);
             defer ast.deinit(allocator);
-            if (ast.nodes.len >= 3) {
-                const node = ast.nodes.get(2);
-                if (node.tag == .VAR_STATEMENT) {
+            if (ast.nodes.len >= 2) {
+                const node = ast.nodes.get(1);
+                if (node.tag == .VAR_STATEMENT or node.tag == .RETURN_STATEMENT) {
                     for (0..ast.nodes.len) |i| {
                         const n = ast.nodes.get(i);
                         try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
@@ -64,8 +64,14 @@ pub fn start() !void {
                     try Parser.convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
                     outlist.shrinkRetainingCapacity(outlist.items.len);
                     try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
+                    // for (0..ast.nodes.len) |i| {
+                    //     const n = ast.nodes.get(i);
+                    //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+                    // }
                 }
             }
+
+            try Parser.print_parser_errors_to_stdout(&ast, stdout);
 
             // var lex = lexer.init(source_code[0..m.len :0]);
             // try lex.print_debug_tokens(stdout);
