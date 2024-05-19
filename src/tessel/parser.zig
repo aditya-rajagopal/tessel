@@ -93,11 +93,20 @@ pub fn begin_parsing(self: *Parser) !void {
                 };
             },
             else => {
-                _ = self.parse_expression() catch |err| switch (err) {
-                    Error.ParsingError => {},
+                const expr_node = try self.add_node(.{
+                    .tag = .EXPRESSION_STATEMENT, //
+                    .main_token = self.token_current,
+                    .node_data = undefined,
+                });
+                const node = self.parse_expression() catch |err| switch (err) {
+                    Error.ParsingError => continue,
                     else => return err,
                 };
+                self.nodes.items(.node_data)[expr_node].lhs = node;
             },
+        }
+        if (self.token_current >= self.token_tags.len) {
+            break;
         }
     }
 }
@@ -297,6 +306,20 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
             .main_token = self.next_token(),
             .node_data = .{ .lhs = undefined, .rhs = undefined },
         }),
+        .LPAREN => {
+            _ = self.next_token();
+            const node = try self.parse_expression_precedence(0);
+            const peek = self.expect_token(.RPAREN);
+            if (peek == null_node) {
+                try self.add_error(.{
+                    .tag = .expected_closing_rparen, //
+                    .token = self.token_current,
+                    .expected = .RPAREN,
+                });
+                return null_node;
+            }
+            return node;
+        },
         else => {
             try self.add_error(.{
                 .tag = .expected_expression, //
@@ -319,12 +342,11 @@ fn add_error(self: *Parser, err: Ast.Error) !void {
     try self.errors.append(self.allocator, err);
 }
 
-fn expect_token(self: *Parser, tag: token.TokenType) bool {
-    if (self.is_next_token(tag)) {
-        self.token_current += 1;
-        return true;
+fn expect_token(self: *Parser, tag: token.TokenType) Ast.Node.NodeIndex {
+    if (self.is_current_token(tag)) {
+        return self.next_token();
     } else {
-        return false;
+        return null_node;
     }
 }
 
@@ -598,7 +620,7 @@ test "parser_test_identifer" {
     const input = "foobar;";
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(2, ast.nodes.len);
+    try testing.expectEqual(3, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
 
     const tests = [_]struct {
@@ -611,6 +633,12 @@ test "parser_test_identifer" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
             .expectedDataRHS = undefined,
         },
         .{
@@ -628,7 +656,7 @@ test "parser_test_int_literal" {
     const input = "15;";
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(2, ast.nodes.len);
+    try testing.expectEqual(3, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
 
     const tests = [_]struct {
@@ -641,6 +669,12 @@ test "parser_test_int_literal" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
             .expectedDataRHS = undefined,
         },
         .{
@@ -661,7 +695,7 @@ test "parser_test_prefix_operators" {
     ;
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
-    try testing.expectEqual(5, ast.nodes.len);
+    try testing.expectEqual(7, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
 
     const tests = [_]struct {
@@ -677,6 +711,12 @@ test "parser_test_prefix_operators" {
             .expectedDataRHS = undefined,
         },
         .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = undefined,
+        },
+        .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 1,
             .expectedDataLHS = undefined,
@@ -685,7 +725,13 @@ test "parser_test_prefix_operators" {
         .{
             .expectedNodeType = .BOOL_NOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 1,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 6,
             .expectedDataRHS = undefined,
         },
         .{
@@ -697,7 +743,7 @@ test "parser_test_prefix_operators" {
         .{
             .expectedNodeType = .NEGATION, //
             .expectedMainToken = 3,
-            .expectedDataLHS = 3,
+            .expectedDataLHS = 5,
             .expectedDataRHS = undefined,
         },
     };
@@ -771,33 +817,33 @@ test "parser_test_infix_operators" {
             .input = "3 < 5 == true",
             .expected = "((3 < 5) == true)",
         },
+        .{
+            .input = "1 + (2 + 3) + 4",
+            .expected = "((1 + (2 + 3)) + 4)",
+        },
+        .{
+            .input = "(5 + 5) * 2",
+            .expected = "((5 + 5) * 2)",
+        },
+        .{
+            .input = "2 / (5 + 5)",
+            .expected = "(2 / (5 + 5))",
+        },
+        .{
+            .input = "(5 + 5) * 2 * (5 + 5)",
+            .expected = "(((5 + 5) * 2) * (5 + 5))",
+        },
+        .{
+            .input = "-(5 + 5)",
+            .expected = "(-(5 + 5))",
+        },
+        .{
+            .input = "!(true == true)",
+            .expected = "(!(true == true))",
+        },
         // .{
-        //     .input = "1 + (2 + 3) + 4",
-        //     .expected = "((1 + (2 + 3)) + 4)",
-        // },
-        // .{
-        //     .input = "(5 + 5) * 2",
-        //     .expected = "((5 + 5) * 2)",
-        // },
-        // .{
-        //     .input = "2 / (5 + 5)",
-        //     .expected = "(2 / (5 + 5))",
-        // },
-        // .{
-        //     .input = "(5 + 5) * 2 * (5 + 5)",
-        //     .expected = "(((5 + 5) * 2) * (5 + 5))",
-        // },
-        // .{
-        //     .input = "-(5 + 5)",
-        //     .expected = "(-(5 + 5))",
-        // },
-        // .{
-        // .input = "!(true == true)",
-        // .expected = "(!(true == true))",
-        // },
-        // .{
-        // .input = "a + add(b * c) + d",
-        // .expected = "((a + add((b * c))) + d)",
+        //     .input = "a + add(b * c) + d",
+        //     .expected = "((a + add((b * c))) + d)",
         // },
         // .{
         // .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))",

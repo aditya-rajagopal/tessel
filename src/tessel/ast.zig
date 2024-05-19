@@ -108,6 +108,7 @@ pub const Error = struct {
         expected_identifier_after_const, //
         expected_assignent_after_var_decl,
         expected_expression,
+        expected_closing_rparen,
         expected_prefix_expression,
     };
 };

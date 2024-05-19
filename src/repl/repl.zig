@@ -64,10 +64,10 @@ pub fn start() !void {
                     try Parser.convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
                     outlist.shrinkRetainingCapacity(outlist.items.len);
                     try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
-                    // for (0..ast.nodes.len) |i| {
-                    //     const n = ast.nodes.get(i);
-                    //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-                    // }
+                    for (0..ast.nodes.len) |i| {
+                        const n = ast.nodes.get(i);
+                        try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+                    }
                 }
             }
 
