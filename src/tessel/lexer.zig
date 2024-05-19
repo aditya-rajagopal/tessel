@@ -23,10 +23,10 @@ pub fn init(input: [:0]const u8) Lexer {
 }
 
 /// Handy debug function to print a token to stderr
-pub fn print_token(self: *Lexer, tok: token.Token, source: []const u8) void {
-    std.debug.assert(tok.loc.start <= self.input.len);
-    std.debug.assert(tok.loc.end <= self.input.len);
-    std.debug.print("{s}: {s:<15}| {s}\n", .{ source, @tagName(tok.type), self.input[tok.loc.start..tok.loc.end] });
+pub fn print_token(source_string: []const u8, tok: token.Token, debug_tag: []const u8) void {
+    std.debug.assert(tok.loc.start <= source_string.len);
+    std.debug.assert(tok.loc.end <= source_string.len);
+    std.debug.print("{s}: {s:<15}| {s}, start:{d}\n", .{ debug_tag, @tagName(tok.type), source_string[tok.loc.start..tok.loc.end], tok.loc.start });
 }
 
 /// Parses the current string being read in the lexer and returns a token based on

@@ -2,13 +2,19 @@ pub const Parser = @This();
 
 source_buffer: [:0]const u8,
 allocator: std.mem.Allocator,
-tokens_tags: []const token.TokenType,
-tokens_start: []const u32,
-tokens_end: []const u32,
+token_tags: []const token.TokenType,
+token_starts: []const u32,
+token_ends: []const u32,
 
 token_current: Ast.TokenArrayIndex,
 
 nodes: Ast.NodeArrayType,
+errors: std.ArrayListUnmanaged(Ast.Error),
+
+/// Since the root node does not have any data and is always at 0 we can use 0 as a null value
+pub const null_node: Ast.Node.NodeIndex = 0;
+
+pub const Error = error{ParsingError} || Allocator.Error;
 
 pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) !Ast {
     std.debug.assert(source_buffer.len > 0);
@@ -29,11 +35,12 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
     var parser = Parser{
         .source_buffer = source_buffer, //
         .allocator = allocator,
-        .tokens_tags = tokens_local.items(.tag),
-        .tokens_start = tokens_local.items(.start),
-        .tokens_end = tokens_local.items(.end),
+        .token_tags = tokens_local.items(.tag),
+        .token_starts = tokens_local.items(.start),
+        .token_ends = tokens_local.items(.end),
         .token_current = 0,
         .nodes = .{},
+        .errors = .{},
     };
     defer parser.deinit(allocator);
 
@@ -43,13 +50,16 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
     try parser.begin_parsing();
 
     return Ast{
+        .source_buffer = source_buffer,
         .tokens = tokens_local.toOwnedSlice(), //
         .nodes = parser.nodes.toOwnedSlice(),
+        .errors = try parser.errors.toOwnedSlice(allocator),
     };
 }
 
 pub fn deinit(self: *Parser, allocator: Allocator) void {
     self.nodes.deinit(allocator);
+    self.errors.deinit(allocator);
 }
 
 pub fn begin_parsing(self: *Parser) !void {
@@ -58,19 +68,741 @@ pub fn begin_parsing(self: *Parser) !void {
         .main_token = 0,
         .node_data = undefined,
     });
+
+    while (true) {
+        // Lexer.print_token(self.source_buffer, .{
+        //     .type = self.token_tags[self.token_current], //
+        //     .loc = .{
+        //         .start = self.token_starts[self.token_current], //
+        //         .end = self.token_ends[self.token_current],
+        //     },
+        // }, "Parser#begin_parsing ");
+
+        switch (self.token_tags[self.token_current]) {
+            .EOF => break,
+            .CONST, .VAR => {
+                _ = self.parse_var_decl() catch |err| switch (err) {
+                    Error.ParsingError => {},
+                    else => return err,
+                };
+            },
+            .RETURN => {
+                _ = self.parse_return_statement() catch |err| switch (err) {
+                    Error.ParsingError => {},
+                    else => return err,
+                };
+            },
+            else => {
+                _ = self.parse_expression() catch |err| switch (err) {
+                    Error.ParsingError => {},
+                    else => return err,
+                };
+            },
+        }
+    }
+}
+
+fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
+    var node = Ast.Node{
+        .tag = Ast.Node.Tag.VAR_STATEMENT, //
+        .main_token = self.next_token(),
+        .node_data = undefined,
+    };
+
+    // After a const or var statement you expect a identifier
+    if (self.is_current_token(.IDENT)) {
+        node.node_data.lhs = try self.add_node(.{
+            .tag = .IDENTIFIER, //
+            .main_token = self.next_token(),
+            .node_data = .{
+                .lhs = undefined, //
+                .rhs = undefined,
+            },
+        });
+    } else {
+        try self.add_error(.{
+            .tag = .expected_identifier_after_const, //
+            .token = self.token_current,
+            .expected = .IDENT,
+        });
+        _ = self.eat_token_till(.SEMICOLON);
+        return Error.ParsingError;
+    }
+
+    if (!self.is_current_token(.ASSIGN)) {
+        try self.add_error(.{
+            .tag = .expected_assignent_after_var_decl, //
+            .token = self.token_current,
+            .expected = .ASSIGN,
+        });
+        _ = self.eat_token_till(.SEMICOLON);
+        return Error.ParsingError;
+    }
+
+    _ = self.eat_token(.ASSIGN);
+
+    _ = self.eat_token_till(.SEMICOLON);
+
+    return self.add_node(node);
+}
+
+fn parse_return_statement(self: *Parser) Error!Ast.Node.NodeIndex {
+    const node = Ast.Node{
+        .tag = .RETURN_STATEMENT, //
+        .main_token = self.token_current,
+        .node_data = .{ .lhs = undefined, .rhs = undefined },
+    };
+
+    _ = self.eat_token_till(.SEMICOLON);
+
+    return self.add_node(node);
+}
+
+const OperatorPrecedence = struct {
+    precedence: i8,
+    tag: Ast.Node.Tag,
+};
+
+const OperatorHierarchy = std.enums.directEnumArrayDefault(token.TokenType, OperatorPrecedence, .{ .precedence = -1, .tag = .ROOT }, 0, .{
+    .EQ = .{ .precedence = 30, .tag = .DOUBLE_EQUAL }, //
+    .NEQ = .{ .precedence = 30, .tag = .NOT_EQUAL },
+
+    .LT = .{ .precedence = 50, .tag = .LESS_THAN },
+    .LTE = .{ .precedence = 50, .tag = .LESS_THAN_EQUAL },
+    .GT = .{ .precedence = 50, .tag = .GREATER_THAN },
+    .GTE = .{ .precedence = 50, .tag = .GREATER_THAN_EQUAL },
+
+    .PLUS = .{ .precedence = 70, .tag = .ADDITION },
+    .MINUS = .{ .precedence = 70, .tag = .SUBTRACTION },
+
+    .ASTRIX = .{ .precedence = 90, .tag = .MULTIPLY },
+    .SLASH = .{ .precedence = 90, .tag = .DIVIDE },
+
+    .FUNCTION = .{ .precedence = 110, .tag = .FUNCTION_CALL },
+});
+
+fn parse_expression(self: *Parser) Error!Ast.Node.NodeIndex {
+    const node = try self.parse_expression_precedence(0);
+    if (node == 0) {
+        try self.add_error(.{
+            .tag = .expected_expression, //
+            .token = self.token_current,
+            .expected = .ILLEGAL,
+        });
+        _ = self.next_token();
+        return null_node;
+    } else {
+        return node;
+    }
+}
+
+fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Node.NodeIndex {
+    std.debug.assert(min_presedence >= 0);
+    // std.debug.print("Enter parse Expression prec: {d} token: {s}\r\n", .{ min_presedence, @tagName(self.token_tags[self.token_current]) });
+    var cur_node = try self.parse_prefix();
+    if (cur_node == null_node) {
+        return null_node;
+    }
+    while (true) {
+        const current_tag = self.token_tags[self.token_current];
+        // std.debug.print("Entering while loop token: {s}\r\n", .{@tagName(current_tag)});
+        if (current_tag == .SEMICOLON or current_tag == .EOF) {
+            // std.debug.print("breaking\r\n", .{});
+            break;
+        }
+        const operator_info: OperatorPrecedence = OperatorHierarchy[@as(usize, @intCast(@intFromEnum(current_tag)))];
+        if (operator_info.precedence < min_presedence) {
+            break;
+        }
+
+        const operator_token = self.next_token();
+
+        const rhs = try self.parse_expression_precedence(operator_info.precedence + 1);
+        if (rhs == 0) {
+            try self.add_error(.{
+                .tag = .expected_expression, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            return cur_node;
+        }
+
+        // std.debug.print("I am reaching here for some reason tag: {s}\r\n", .{@tagName(current_tag)});
+        cur_node = try self.add_node(.{
+            .tag = operator_info.tag, //
+            .main_token = operator_token,
+            .node_data = .{
+                .lhs = cur_node, //
+                .rhs = rhs,
+            },
+        });
+    }
+    _ = self.eat_token(.SEMICOLON);
+    // std.debug.print("Exiting parse Expression", .{});
+    return cur_node;
+}
+
+fn parse_prefix(self: *Parser) Error!Ast.Node.NodeIndex {
+    // std.debug.print("Entering prefix parser token: {s}\r\n", .{@tagName(self.token_tags[self.token_current])});
+    const tag_type: Ast.Node.Tag = switch (self.token_tags[self.token_current]) {
+        .BANG => .BOOL_NOT,
+        .MINUS => .NEGATION,
+        else => return self.parse_other_expressions(),
+    };
+    // std.debug.print("Parsing Prefix tag: {s}\r\n", .{@tagName(tag_type)});
+    const main_token = self.next_token();
+    return self.add_node(.{
+        .tag = tag_type, //
+        .main_token = main_token,
+        .node_data = .{ //
+            .lhs = try self.parse_expect_prefix_expression(),
+            .rhs = 0,
+        },
+    });
+}
+
+fn parse_expect_prefix_expression(self: *Parser) Error!Ast.Node.NodeIndex {
+    const node = try self.parse_prefix();
+    if (node == 0) {
+        try self.add_error(.{
+            .tag = .expected_prefix_expression, //
+            .token = self.token_current,
+            .expected = .ILLEGAL,
+        });
+        return Error.ParsingError;
+    }
+    return node;
+}
+
+fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
+    switch (self.token_tags[self.token_current]) {
+        .IDENT => return self.add_node(.{
+            .tag = .IDENTIFIER, //
+            .main_token = self.next_token(),
+            .node_data = .{ .lhs = undefined, .rhs = undefined },
+        }),
+        .INT => return self.add_node(.{
+            .tag = .INTEGER_LITERAL, //
+            .main_token = self.next_token(),
+            .node_data = .{ .lhs = undefined, .rhs = undefined },
+        }),
+        else => {
+            try self.add_error(.{
+                .tag = .expected_expression, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            _ = self.next_token();
+            return Error.ParsingError;
+        },
+    }
+}
+
+fn add_node(self: *Parser, node: Ast.Node) !Ast.Node.NodeIndex {
+    const node_index = @as(Ast.Node.NodeIndex, @intCast(self.nodes.len));
+    try self.nodes.append(self.allocator, node);
+    return node_index;
+}
+
+fn add_error(self: *Parser, err: Ast.Error) !void {
+    try self.errors.append(self.allocator, err);
+}
+
+fn expect_token(self: *Parser, tag: token.TokenType) bool {
+    if (self.is_next_token(tag)) {
+        self.token_current += 1;
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn next_token(self: *Parser) Ast.TokenArrayIndex {
+    const result = self.token_current;
+    self.token_current += 1;
+    return result;
+}
+
+fn eat_token(self: *Parser, tag: token.TokenType) ?Ast.TokenArrayIndex {
+    if (self.is_current_token(tag)) {
+        return self.next_token();
+    } else {
+        return null;
+    }
+}
+
+fn eat_token_till(self: *Parser, tag: token.TokenType) Ast.TokenArrayIndex {
+    while (!self.is_current_token(tag) and !self.is_current_token(.EOF)) {
+        _ = self.next_token();
+    }
+    _ = self.eat_token(tag) orelse null;
+    return self.token_current;
+}
+
+fn is_current_token(self: *Parser, tag: token.TokenType) bool {
+    return self.token_current < self.token_ends.len and self.token_tags[self.token_current] == tag;
+}
+fn is_next_token(self: *Parser, tag: token.TokenType) bool {
+    return self.token_current < self.token_ends.len - 1 and self.token_tags[self.token_current + 1] == tag;
 }
 
 test "parser_initialization_test_only_root_node" {
-    const input = "a";
+    const input = "\n";
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
 
-    var ast = try Parser.parse_program(input, allocator);
     try testing.expectEqual(ast.nodes.len, 1);
     try testing.expectEqual(ast.nodes.get(0).tag, .ROOT);
     try testing.expectEqual(ast.nodes.get(0).main_token, 0);
+}
+
+test "parser_test_var_decl" {
+    const input =
+        \\ const a = 10;
+        \\ const b = 15;
+        \\ var foobar = 1121414;
+    ;
+
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(7, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 11,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = undefined,
+        },
+    };
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parse_test_var_decl_errors" {
+    const input =
+        \\ const a 10;
+        \\ const = 15;
+        \\ var foobar = 1121414;
+    ;
+
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(ast.errors.len, 2);
+
+    const tests = [_]struct {
+        expectedErrTag: Ast.Error.Tag, //
+        expectedTokenIndex: Ast.TokenArrayIndex,
+        expectedExpectedToken: token.TokenType,
+    }{
+        .{
+            .expectedErrTag = .expected_assignent_after_var_decl, //
+            .expectedTokenIndex = 2,
+            .expectedExpectedToken = .ASSIGN,
+        },
+        .{
+            .expectedErrTag = .expected_identifier_after_const, //
+            .expectedTokenIndex = 5,
+            .expectedExpectedToken = .IDENT,
+        },
+    };
+
+    for (ast.errors, tests) |err, t| {
+        try testing.expectEqual(err.token, t.expectedTokenIndex);
+        try testing.expectEqual(err.tag, t.expectedErrTag);
+        try testing.expectEqual(err.expected, t.expectedExpectedToken);
+        // const tok = ast.tokens.get(err.token);
+        // std.debug.print("Parser Errors! ({s}): At location {d} in the source code," ++
+        //     " expected token of type {s} but instead got token of type {s}: {s}\n", .{
+        //     @tagName(err.tag),
+        //     tok.start, //
+        //     @tagName(err.expected),
+        //     @tagName(tok.tag),
+        //     input[tok.start..tok.end],
+        // });
+    }
+}
+
+test "parser_test_return_stmt" {
+    const input =
+        \\ return 5;
+        \\ return 10;
+        \\ return 151241;
+    ;
+
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(ast.nodes.len, 4);
+    try testing.expectEqual(ast.errors.len, 0);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .RETURN_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .RETURN_STATEMENT, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .RETURN_STATEMENT, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+    };
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parser_test_identifer" {
+    const input = "foobar;";
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(2, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+    };
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parser_test_int_literal" {
+    const input = "15;";
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(2, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+    };
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parser_test_prefix_operators" {
+    const input =
+        \\!15;
+        \\-25;
+    ;
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(5, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .BOOL_NOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 4,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .NEGATION, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = undefined,
+        },
+    };
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parser_test_infix_operators" {
+    const tests = [_]struct { input: [:0]const u8, expected: [:0]const u8 }{
+        .{
+            .input = "-a * b", //
+            .expected = "((-a) * b)",
+        },
+        .{
+            .input = "!-a",
+            .expected = "(!(-a))",
+        },
+        .{
+            .input = "a + b + c",
+            .expected = "((a + b) + c)",
+        },
+        .{
+            .input = "a + b - c",
+            .expected = "((a + b) - c)",
+        },
+        .{
+            .input = "a * b * c",
+            .expected = "((a * b) * c)",
+        },
+        .{
+            .input = "a * b / c",
+            .expected = "((a * b) / c)",
+        },
+        .{
+            .input = "a + b / c",
+            .expected = "(a + (b / c))",
+        },
+        .{
+            .input = "a + b * c + d / e - f",
+            .expected = "(((a + (b * c)) + (d / e)) - f)",
+        },
+        // .{
+        // .input = "3 + 4; -5 * 5",
+        // .expected = "(3 + 4)((-5) * 5)",
+        // },
+        .{
+            .input = "5 > 4 == 3 < 4",
+            .expected = "((5 > 4) == (3 < 4))",
+        },
+        .{
+            .input = "5 < 4 != 3 > 4",
+            .expected = "((5 < 4) != (3 > 4))",
+        },
+        .{
+            .input = "3 + 4 * 5 == 3 * 1 + 4 * 5",
+            .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))",
+        },
+        // .{
+        // .input = "true",
+        // .expected = "true",
+        // },
+        // .{
+        // .input = "false",
+        // .expected = "false",
+        // },
+        // .{
+        // .input = "3 > 5 == false",
+        // .expected = "((3 > 5) == false)",
+        // },
+        // .{
+        // .input = "3 < 5 == true",
+        // .expected = "((3 < 5) == true)",
+        // },
+        // .{
+        //     .input = "1 + (2 + 3) + 4",
+        //     .expected = "((1 + (2 + 3)) + 4)",
+        // },
+        // .{
+        //     .input = "(5 + 5) * 2",
+        //     .expected = "((5 + 5) * 2)",
+        // },
+        // .{
+        //     .input = "2 / (5 + 5)",
+        //     .expected = "(2 / (5 + 5))",
+        // },
+        // .{
+        //     .input = "(5 + 5) * 2 * (5 + 5)",
+        //     .expected = "(((5 + 5) * 2) * (5 + 5))",
+        // },
+        // .{
+        //     .input = "-(5 + 5)",
+        //     .expected = "(-(5 + 5))",
+        // },
+        // .{
+        // .input = "!(true == true)",
+        // .expected = "(!(true == true))",
+        // },
+        // .{
+        // .input = "a + add(b * c) + d",
+        // .expected = "((a + add((b * c))) + d)",
+        // },
+        // .{
+        // .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))",
+        // .expected = "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)))",
+        // },
+        // .{
+        // .input = "add(a + b + c * d / f + g)",
+        // .expected = "add((((a + b) + ((c * d) / f)) + g))",
+        // },
+    };
+    for (tests, 0..) |t, i| {
+        _ = i;
+        var ast = try Parser.parse_program(t.input, testing.allocator);
+        defer ast.deinit(testing.allocator);
+        var outlist = std.ArrayList(u8).init(testing.allocator);
+        defer outlist.deinit();
+        try convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
+        outlist.shrinkRetainingCapacity(outlist.items.len);
+        try testing.expectEqualSlices(u8, t.expected[0..t.expected.len], outlist.allocatedSlice()[0..outlist.items.len]);
+        // std.debug.print("Index: {d}\r\n", .{i});
+        // std.debug.print("Source: {s}\r\n", .{t.input});
+        // std.debug.print("Parsed: {s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
+        // std.debug.print("Parsed: {s}\r\n", .{t.expected});
+    }
+}
+
+pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
+    const node = ast.nodes.get(root_node);
+    switch (node.tag) {
+        .MULTIPLY, //
+        .ADDITION,
+        .SUBTRACTION,
+        .DIVIDE,
+        .LESS_THAN,
+        .GREATER_THAN,
+        => {
+            try list.append('(');
+            try convert_ast_to_string(ast, node.node_data.lhs, list);
+            try list.append(' ');
+            try list.appendSlice(Ast.Node.Tag.get_operator_string(node.tag));
+            try list.append(' ');
+            try convert_ast_to_string(ast, node.node_data.rhs, list);
+            try list.append(')');
+        },
+
+        .GREATER_THAN_EQUAL,
+        .LESS_THAN_EQUAL,
+        .DOUBLE_EQUAL,
+        .NOT_EQUAL,
+        => {
+            try list.append('(');
+            try convert_ast_to_string(ast, node.node_data.lhs, list);
+            try list.append(' ');
+            const op_str = Ast.Node.Tag.get_operator_string(node.tag);
+            std.debug.assert(op_str.len == 2);
+            try list.appendSlice(op_str);
+            try list.append(' ');
+            try convert_ast_to_string(ast, node.node_data.rhs, list);
+            try list.append(')');
+        },
+        .INTEGER_LITERAL, .IDENTIFIER => {
+            const tok = ast.tokens.get(node.main_token);
+            const literal = ast.source_buffer[tok.start..tok.end];
+            try list.appendSlice(literal);
+        },
+        .NEGATION, .BOOL_NOT => {
+            try list.append('(');
+            try list.appendSlice(Ast.Node.Tag.get_operator_string(node.tag));
+            try convert_ast_to_string(ast, node.node_data.lhs, list);
+            try list.append(')');
+        },
+        else => {},
+    }
+}
+
+fn testing_check_nodes(ast: *Ast, tests: anytype, enable_debug: bool) !void {
+    for (0..ast.nodes.len) |node| {
+        const n = ast.nodes.get(node);
+        if (enable_debug) {
+            std.debug.print("Nodes: {any}\r\n", .{n});
+        }
+        try testing.expectEqual(n.tag, tests[node].expectedNodeType);
+        try testing.expectEqual(n.main_token, tests[node].expectedMainToken);
+        try testing.expectEqual(n.node_data.lhs, tests[node].expectedDataLHS);
+        try testing.expectEqual(n.node_data.rhs, tests[node].expectedDataRHS);
+    }
 }
 
 const std = @import("std");

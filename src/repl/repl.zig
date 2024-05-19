@@ -49,8 +49,26 @@ pub fn start() !void {
             @memcpy(source_code, m.ptr);
             source_code[m.len] = 0;
 
-            var lex = lexer.init(source_code[0..m.len :0]);
-            try lex.print_debug_tokens(stdout);
+            var ast = try Parser.parse_program(source_code[0..m.len :0], allocator);
+            defer ast.deinit(allocator);
+            if (ast.nodes.len >= 3) {
+                const node = ast.nodes.get(2);
+                if (node.tag == .VAR_STATEMENT) {
+                    for (0..ast.nodes.len) |i| {
+                        const n = ast.nodes.get(i);
+                        try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+                    }
+                } else {
+                    var outlist = std.ArrayList(u8).init(allocator);
+                    defer outlist.deinit();
+                    try Parser.convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
+                    outlist.shrinkRetainingCapacity(outlist.items.len);
+                    try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
+                }
+            }
+
+            // var lex = lexer.init(source_code[0..m.len :0]);
+            // try lex.print_debug_tokens(stdout);
             try bw.flush();
         }
     }
@@ -66,3 +84,4 @@ fn print_header(stdout: anytype) !void {
 
 const std = @import("std");
 const lexer = @import("../tessel/lexer.zig");
+const Parser = @import("../tessel/parser.zig");
