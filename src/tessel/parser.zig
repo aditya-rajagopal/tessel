@@ -9,6 +9,7 @@ token_ends: []const u32,
 token_current: Ast.TokenArrayIndex,
 
 nodes: Ast.NodeArrayType,
+extra_data: std.ArrayListUnmanaged(Ast.Node.NodeIndex),
 errors: std.ArrayListUnmanaged(Ast.Error),
 
 /// Since the root node does not have any data and is always at 0 we can use 0 as a null value
@@ -41,6 +42,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
         .token_current = 0,
         .nodes = .{},
         .errors = .{},
+        .extra_data = .{},
     };
     defer parser.deinit(allocator);
 
@@ -54,12 +56,14 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
         .tokens = tokens_local.toOwnedSlice(), //
         .nodes = parser.nodes.toOwnedSlice(),
         .errors = try parser.errors.toOwnedSlice(allocator),
+        .extra_data = try parser.extra_data.toOwnedSlice(allocator),
     };
 }
 
 pub fn deinit(self: *Parser, allocator: Allocator) void {
     self.nodes.deinit(allocator);
     self.errors.deinit(allocator);
+    self.extra_data.deinit(allocator);
 }
 
 pub fn begin_parsing(self: *Parser) !void {
@@ -77,38 +81,46 @@ pub fn begin_parsing(self: *Parser) !void {
         //         .end = self.token_ends[self.token_current],
         //     },
         // }, "Parser#begin_parsing ");
-
-        switch (self.token_tags[self.token_current]) {
-            .EOF => break,
-            .CONST, .VAR => {
-                _ = self.parse_var_decl() catch |err| switch (err) {
-                    Error.ParsingError => {},
-                    else => return err,
-                };
-            },
-            .RETURN => {
-                _ = self.parse_return_statement() catch |err| switch (err) {
-                    Error.ParsingError => {},
-                    else => return err,
-                };
-            },
-            else => {
-                const expr_node = try self.add_node(.{
-                    .tag = .EXPRESSION_STATEMENT, //
-                    .main_token = self.token_current,
-                    .node_data = undefined,
-                });
-                const node = self.parse_expression() catch |err| switch (err) {
-                    Error.ParsingError => continue,
-                    else => return err,
-                };
-                self.nodes.items(.node_data)[expr_node].lhs = node;
-            },
+        _ = try self.parse_statement();
+        if (self.is_current_token(.EOF)) {
+            break;
         }
         if (self.token_current >= self.token_tags.len) {
             break;
         }
     }
+}
+
+fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
+    switch (self.token_tags[self.token_current]) {
+        .EOF => return null_node,
+        .CONST, .VAR => {
+            return self.parse_var_decl() catch |err| switch (err) {
+                Error.ParsingError => return null_node,
+                else => return err,
+            };
+        },
+        .RETURN => {
+            return self.parse_return_statement() catch |err| switch (err) {
+                Error.ParsingError => return null_node,
+                else => return err,
+            };
+        },
+        else => escape: {
+            const expr_node = try self.add_node(.{
+                .tag = .EXPRESSION_STATEMENT, //
+                .main_token = self.token_current,
+                .node_data = undefined,
+            });
+            const node = self.parse_expression() catch |err| switch (err) {
+                Error.ParsingError => break :escape,
+                else => return err,
+            };
+            self.nodes.items(.node_data)[expr_node].lhs = node;
+            return expr_node;
+        },
+    }
+    return null_node;
 }
 
 fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -309,17 +321,10 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
         .LPAREN => {
             _ = self.next_token();
             const node = try self.parse_expression_precedence(0);
-            const peek = self.expect_token(.RPAREN);
-            if (peek == null_node) {
-                try self.add_error(.{
-                    .tag = .expected_closing_rparen, //
-                    .token = self.token_current,
-                    .expected = .RPAREN,
-                });
-                return null_node;
-            }
+            _ = try self.expect_token(.RPAREN);
             return node;
         },
+        .IF => return self.parse_if_expression(),
         else => {
             try self.add_error(.{
                 .tag = .expected_expression, //
@@ -332,22 +337,95 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
     }
 }
 
-fn add_node(self: *Parser, node: Ast.Node) !Ast.Node.NodeIndex {
+fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
+    // We sould only come here if we have an if token
+    std.debug.assert(self.token_tags[self.token_current] == .IF);
+    const if_token = self.token_current;
+    _ = try self.expect_token(.IF);
+    _ = try self.expect_token(.LPAREN);
+
+    const condition = try self.parse_expression();
+    if (condition == null_node) {
+        return null_node;
+    }
+    _ = try self.expect_token(.RPAREN);
+
+    const if_block = try self.parse_block();
+    if (!self.is_current_token(.ELSE)) {
+        return self.add_node(.{
+            .tag = .NAKED_IF,
+            .main_token = if_token, //
+            .node_data = .{
+                .lhs = condition, //
+                .rhs = if_block,
+            },
+        });
+    }
+    _ = try self.expect_token(.ELSE);
+
+    const else_block = try self.parse_block();
+    const block_storage_start = self.extra_data.items.len;
+    try self.extra_data.append(self.allocator, if_block);
+    try self.extra_data.append(self.allocator, else_block);
+    return self.add_node(.{
+        .tag = .IF_ELSE,
+        .main_token = if_token, //
+        .node_data = .{
+            .lhs = condition, //
+            .rhs = @as(u32, @intCast(block_storage_start)),
+        },
+    });
+}
+
+fn parse_block(self: *Parser) Error!Ast.Node.NodeIndex {
+    const left_brace = try self.expect_token(.LBRACE);
+    const start_point = self.extra_data.items.len;
+    // We will keep looping through statements till we encounter a closing brace
+    while (true) {
+        if (self.is_current_token(.RBRACE)) {
+            break;
+        }
+        const statement = try self.parse_statement();
+        try self.extra_data.append(self.allocator, statement);
+    }
+    const end_point = self.extra_data.items.len;
+    _ = self.eat_token(.RBRACE) orelse null;
+
+    return self.add_node(.{
+        .tag = .BLOCK, //
+        .main_token = left_brace,
+        .node_data = .{
+            .lhs = @as(u32, @intCast(start_point)), //
+            .rhs = @as(u32, @intCast(end_point)),
+        },
+    });
+}
+
+fn add_node(self: *Parser, node: Ast.Node) Allocator.Error!Ast.Node.NodeIndex {
     const node_index = @as(Ast.Node.NodeIndex, @intCast(self.nodes.len));
     try self.nodes.append(self.allocator, node);
     return node_index;
 }
 
-fn add_error(self: *Parser, err: Ast.Error) !void {
+fn add_error(self: *Parser, err: Ast.Error) Allocator.Error!void {
     try self.errors.append(self.allocator, err);
 }
 
-fn expect_token(self: *Parser, tag: token.TokenType) Ast.Node.NodeIndex {
+fn expect_token(self: *Parser, tag: token.TokenType) Error!Ast.TokenArrayIndex {
     if (self.is_current_token(tag)) {
         return self.next_token();
     } else {
-        return null_node;
+        return self.token_parsing_error(.{
+            .tag = .expected_token, //
+            .token = self.token_current,
+            .expected = tag,
+        });
     }
+}
+
+fn token_parsing_error(self: *Parser, err: Ast.Error) Error {
+    try self.add_error(err);
+    return Error.ParsingError;
 }
 
 fn next_token(self: *Parser) Ast.TokenArrayIndex {
@@ -868,6 +946,220 @@ test "parser_test_infix_operators" {
         // std.debug.print("Parsed: {s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
         // std.debug.print("Parsed: {s}\r\n", .{t.expected});
     }
+}
+
+test "parser_test_if_else_block" {
+    const input =
+        \\ const a = if ( a < b) {
+        \\      var b = 10;
+        \\ } else {
+        \\      var b = 15;
+        \\ }
+    ;
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+
+    try testing.expectEqual(15, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 14,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 7,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .LESS_THAN, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 7,
+            .expectedDataRHS = 8,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 11,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 13,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .BLOCK, //
+            .expectedMainToken = 9,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 1,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 18,
+            .expectedDataLHS = 11,
+            .expectedDataRHS = 12,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 19,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 21,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .BLOCK, //
+            .expectedMainToken = 17,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 2,
+        },
+        .{
+            .expectedNodeType = .IF_ELSE, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 2,
+        },
+    };
+
+    const test_extra_data = [_]u32{ 6, 10, 9, 13 };
+
+    try testing.expectEqual(test_extra_data.len, ast.extra_data.len);
+    try testing.expectEqualSlices(u32, ast.extra_data[0..ast.extra_data.len], &test_extra_data);
+
+    try testing_check_nodes(&ast, tests, false);
+}
+
+test "parser_test_naked_if" {
+    const input =
+        \\ const a = if ( a < b) {
+        \\      var b = 10;
+        \\ }
+    ;
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+
+    try testing.expectEqual(11, ast.nodes.len);
+    try testing.expectEqual(0, ast.errors.len);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 10,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 7,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .LESS_THAN, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 7,
+            .expectedDataRHS = 8,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 11,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 13,
+            .expectedDataLHS = undefined,
+            .expectedDataRHS = undefined,
+        },
+        .{
+            .expectedNodeType = .BLOCK, //
+            .expectedMainToken = 9,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 1,
+        },
+        .{
+            .expectedNodeType = .NAKED_IF, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 9,
+        },
+    };
+
+    const test_extra_data = [_]u32{6};
+
+    try testing.expectEqual(test_extra_data.len, ast.extra_data.len);
+    try testing.expectEqualSlices(u32, ast.extra_data[0..ast.extra_data.len], &test_extra_data);
+
+    try testing_check_nodes(&ast, tests, false);
 }
 
 pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {

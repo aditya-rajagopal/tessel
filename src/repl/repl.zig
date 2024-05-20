@@ -58,6 +58,12 @@ pub fn start() !void {
                         const n = ast.nodes.get(i);
                         try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
                     }
+                    try stdout.print("Extra Data: ", .{});
+                    for (0..ast.extra_data.len) |i| {
+                        const n = ast.extra_data[i];
+                        try stdout.print("{}, ", .{n});
+                    }
+                    try stdout.print("\n", .{});
                 } else {
                     var outlist = std.ArrayList(u8).init(allocator);
                     defer outlist.deinit();
@@ -68,6 +74,12 @@ pub fn start() !void {
                         const n = ast.nodes.get(i);
                         try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
                     }
+                    try stdout.print("Extra Data: ", .{});
+                    for (0..ast.extra_data.len) |i| {
+                        const n = ast.extra_data[i];
+                        try stdout.print("{}, ", .{n});
+                    }
+                    try stdout.print("\n", .{});
                 }
             }
 
