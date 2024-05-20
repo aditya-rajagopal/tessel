@@ -89,6 +89,8 @@ pub const Node = struct {
         IF,
         NAKED_IF,
         IF_ELSE,
+        FUNCTION_PARAMETER_BLOCK,
+        FUNCTION_EXPRESSION,
         FUNCTION_CALL,
 
         pub fn get_operator_string(tag: Tag) []const u8 {

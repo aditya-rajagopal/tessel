@@ -51,37 +51,25 @@ pub fn start() !void {
 
             var ast = try Parser.parse_program(source_code[0..m.len :0], allocator);
             defer ast.deinit(allocator);
-            if (ast.nodes.len >= 2) {
-                const node = ast.nodes.get(1);
-                if (node.tag == .VAR_STATEMENT or node.tag == .RETURN_STATEMENT) {
-                    for (0..ast.nodes.len) |i| {
-                        const n = ast.nodes.get(i);
-                        try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-                    }
-                    try stdout.print("Extra Data: ", .{});
-                    for (0..ast.extra_data.len) |i| {
-                        const n = ast.extra_data[i];
-                        try stdout.print("{}, ", .{n});
-                    }
-                    try stdout.print("\n", .{});
-                } else {
-                    var outlist = std.ArrayList(u8).init(allocator);
-                    defer outlist.deinit();
-                    try Parser.convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
-                    outlist.shrinkRetainingCapacity(outlist.items.len);
-                    try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
-                    for (0..ast.nodes.len) |i| {
-                        const n = ast.nodes.get(i);
-                        try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-                    }
-                    try stdout.print("Extra Data: ", .{});
-                    for (0..ast.extra_data.len) |i| {
-                        const n = ast.extra_data[i];
-                        try stdout.print("{}, ", .{n});
-                    }
-                    try stdout.print("\n", .{});
-                }
-            }
+
+            var outlist = std.ArrayList(u8).init(allocator);
+            defer outlist.deinit();
+            try Parser.convert_ast_to_string(&ast, 1, &outlist);
+            outlist.shrinkRetainingCapacity(outlist.items.len);
+            try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
+
+            // for (0..ast.nodes.len) |i| {
+            //     const n = ast.nodes.get(i);
+            //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+            // }
+            //
+            // try stdout.print("Extra Data: ", .{});
+            // for (0..ast.extra_data.len) |i| {
+            //     const n = ast.extra_data[i];
+            //     try stdout.print("{}, ", .{n});
+            // }
+            //
+            // try stdout.print("\n", .{});
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
 
