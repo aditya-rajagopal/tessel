@@ -12,6 +12,7 @@ nodes: NodeArrayType.Slice,
 /// stored
 extra_data: []Node.NodeIndex,
 errors: []const Error,
+integer_literals: []const i64,
 
 pub const TokenArrayIndex = u32;
 pub const TokenArray = struct {
@@ -28,6 +29,7 @@ pub fn deinit(self: *Ast, allocator: Allocator) void {
     self.nodes.deinit(allocator);
     allocator.free(self.errors);
     allocator.free(self.extra_data);
+    allocator.free(self.integer_literals);
 }
 
 pub const Node = struct {
@@ -42,12 +44,18 @@ pub const Node = struct {
         ROOT,
         /// Variable decleration
         /// of the type const/var .IDENT = EXPRESSION
+        /// lhs = identifier node
+        /// rhs = expression to store into the node
         VAR_STATEMENT,
         /// Return control statment
         /// return <expression>;
+        /// lhs = return expression node;
+        /// rhs = 0;
         RETURN_STATEMENT,
         /// Expression statement
         /// <expression>;
+        /// lhs = expression start node;
+        /// rhs = 0;
         EXPRESSION_STATEMENT,
         /// Indicates a block of statments
         /// The statments are stored in teh extra_data array
@@ -59,7 +67,8 @@ pub const Node = struct {
         IDENTIFIER,
         /// Has no child data nodes
         INTEGER_LITERAL,
-        /// Has no child data nodes
+        /// main_token is the location of the litera
+        /// lhs = 0 if false literal and 1 if true literal
         BOOLEAN_LITERAL,
         /// ! lhs. rhs is empty.
         BOOL_NOT,
@@ -85,12 +94,32 @@ pub const Node = struct {
         MULTIPLY,
         /// lhs / rhs / token is the main_token
         DIVIDE,
-        ///
-        IF,
+        /// If statement without an else block
+        /// lhs = condition expression node
+        /// rhs = block to evaulate if lhs is true
         NAKED_IF,
+        /// If statement with an else block
+        /// lhs = condition expression node
+        /// rhs = start location in extra_nodes block to read from
+        /// extra_data[rhs] => if block
+        /// extra_data[rhs+1] => else block node
         IF_ELSE,
-        FUNCTION_PARAMETER_BLOCK,
+        /// fn <FUNCTION_PARAMETER_BLOCK> <FUNCTION_BLOCK>
+        /// function expression main_token = fn
+        /// lhs = <FUNCTION_PARAMETER_BLOCK>
+        /// rhs = <FUNCTION_BLOCK> of type BLOCK
         FUNCTION_EXPRESSION,
+        /// Parameters of a function decleration.
+        /// this is a list of identifiers
+        /// main_token = (
+        /// lhs = node in ast of the first identifier
+        /// rhs - 1 = node to search till for all the identifiers
+        FUNCTION_PARAMETER_BLOCK,
+        /// A function call expression
+        /// main_token = (
+        /// lhs = node of identifier with function's name
+        /// rhs = location in extra_datas array
+        /// the values in extra_data[extra_data[rhs] .
         FUNCTION_CALL,
 
         pub fn get_operator_string(tag: Tag) []const u8 {

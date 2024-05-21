@@ -58,23 +58,21 @@ pub fn start() !void {
             outlist.shrinkRetainingCapacity(outlist.items.len);
             try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
 
-            // for (0..ast.nodes.len) |i| {
-            //     const n = ast.nodes.get(i);
-            //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-            // }
-            //
-            // try stdout.print("Extra Data: ", .{});
-            // for (0..ast.extra_data.len) |i| {
-            //     const n = ast.extra_data[i];
-            //     try stdout.print("{}, ", .{n});
-            // }
-            //
-            // try stdout.print("\n", .{});
+            for (0..ast.nodes.len) |i| {
+                const n = ast.nodes.get(i);
+                try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+            }
+
+            try stdout.print("Extra Data: ", .{});
+            for (0..ast.extra_data.len) |i| {
+                const n = ast.extra_data[i];
+                try stdout.print("{}, ", .{n});
+            }
+
+            try stdout.print("\n", .{});
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
 
-            // var lex = lexer.init(source_code[0..m.len :0]);
-            // try lex.print_debug_tokens(stdout);
             try bw.flush();
         }
     }

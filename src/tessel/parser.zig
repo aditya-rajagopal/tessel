@@ -11,6 +11,7 @@ token_current: Ast.TokenArrayIndex,
 nodes: Ast.NodeArrayType,
 extra_data: std.ArrayListUnmanaged(Ast.Node.NodeIndex),
 errors: std.ArrayListUnmanaged(Ast.Error),
+integer_literal_program_memory: std.ArrayListUnmanaged(i64),
 
 /// Since the root node does not have any data and is always at 0 we can use 0 as a null value
 pub const null_node: Ast.Node.NodeIndex = 0;
@@ -43,6 +44,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
         .nodes = .{},
         .errors = .{},
         .extra_data = .{},
+        .integer_literal_program_memory = .{},
     };
     defer parser.deinit(allocator);
 
@@ -57,6 +59,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
         .nodes = parser.nodes.toOwnedSlice(),
         .errors = try parser.errors.toOwnedSlice(allocator),
         .extra_data = try parser.extra_data.toOwnedSlice(allocator),
+        .integer_literals = try parser.integer_literal_program_memory.toOwnedSlice(allocator),
     };
 }
 
@@ -64,13 +67,17 @@ pub fn deinit(self: *Parser, allocator: Allocator) void {
     self.nodes.deinit(allocator);
     self.errors.deinit(allocator);
     self.extra_data.deinit(allocator);
+    self.integer_literal_program_memory.deinit(allocator);
 }
 
 pub fn begin_parsing(self: *Parser) !void {
     self.nodes.appendAssumeCapacity(.{
         .tag = .ROOT, //
         .main_token = 0,
-        .node_data = undefined,
+        .node_data = .{
+            .lhs = 0,
+            .rhs = 0,
+        },
     });
 
     while (true) {
@@ -97,25 +104,26 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
         .CONST, .VAR => {
             return self.parse_var_decl() catch |err| switch (err) {
                 Error.ParsingError => return null_node,
-                else => return err,
+                else => |overflow| return overflow,
             };
         },
         .RETURN => {
             return self.parse_return_statement() catch |err| switch (err) {
                 Error.ParsingError => return null_node,
-                else => return err,
+                else => |overflow| return overflow,
             };
         },
         else => escape: {
             const expr_node = try self.add_node(.{
                 .tag = .EXPRESSION_STATEMENT, //
                 .main_token = self.token_current,
-                .node_data = undefined,
+                .node_data = .{ .lhs = 0, .rhs = 0 },
             });
             const node = self.parse_expression() catch |err| switch (err) {
                 Error.ParsingError => break :escape,
-                else => return err,
+                else => |overflow| return overflow,
             };
+            _ = self.eat_token(.SEMICOLON);
             self.nodes.items(.node_data)[expr_node].lhs = node;
             return expr_node;
         },
@@ -136,8 +144,8 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
-                .lhs = undefined, //
-                .rhs = undefined,
+                .lhs = 0, //
+                .rhs = 0,
             },
         });
     } else {
@@ -166,6 +174,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
     if (rhs == 0) {
         return node;
     }
+    _ = try self.expect_token(.SEMICOLON);
     self.nodes.items(.node_data)[node].rhs = rhs;
     return node;
 }
@@ -174,13 +183,17 @@ fn parse_return_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     const node = try self.add_node(.{
         .tag = .RETURN_STATEMENT, //
         .main_token = self.next_token(),
-        .node_data = .{ .lhs = undefined, .rhs = undefined },
+        .node_data = .{
+            .lhs = 0,
+            .rhs = 0,
+        },
     });
 
     const lhs = try self.parse_expression();
     if (lhs == 0) {
         return node;
     }
+    _ = try self.expect_token(.SEMICOLON);
     self.nodes.items(.node_data)[node].lhs = lhs;
 
     return node;
@@ -228,18 +241,18 @@ fn parse_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 
 fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Node.NodeIndex {
     std.debug.assert(min_presedence >= 0);
-    // std.debug.print("Enter parse Expression prec: {d} token: {s}\r\n", .{ min_presedence, @tagName(self.token_tags[self.token_current]) });
+
     var cur_node = try self.parse_prefix();
     if (cur_node == null_node) {
         return null_node;
     }
+
     while (true) {
         const current_tag = self.token_tags[self.token_current];
-        // std.debug.print("Entering while loop token: {s}\r\n", .{@tagName(current_tag)});
         if (current_tag == .SEMICOLON or current_tag == .EOF) {
-            // std.debug.print("breaking\r\n", .{});
             break;
         }
+
         const operator_info: OperatorPrecedence = OperatorHierarchy[@as(usize, @intCast(@intFromEnum(current_tag)))];
         if (operator_info.precedence < min_presedence) {
             break;
@@ -251,7 +264,9 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
             cur_node = try self.parse_function_call(cur_node, operator_token);
             continue;
         }
+
         const rhs = try self.parse_expression_precedence(operator_info.precedence + 1);
+
         if (rhs == 0) {
             try self.add_error(.{
                 .tag = .expected_expression, //
@@ -261,7 +276,6 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
             return cur_node;
         }
 
-        // std.debug.print("I am reaching here for some reason tag: {s}\r\n", .{@tagName(current_tag)});
         cur_node = try self.add_node(.{
             .tag = operator_info.tag, //
             .main_token = operator_token,
@@ -271,7 +285,6 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
             },
         });
     }
-    _ = self.eat_token(.SEMICOLON);
     return cur_node;
 }
 
@@ -312,17 +325,29 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
         .IDENT => return self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
-            .node_data = .{ .lhs = undefined, .rhs = undefined },
+            .node_data = .{ .lhs = 0, .rhs = 0 },
         }),
-        .INT => return self.add_node(.{
-            .tag = .INTEGER_LITERAL, //
-            .main_token = self.next_token(),
-            .node_data = .{ .lhs = undefined, .rhs = undefined },
-        }),
-        .TRUE, .FALSE => return self.add_node(.{
+        .INT => {
+            const location = self.register_integer_literal() catch |err| switch (err) {
+                std.fmt.ParseIntError.Overflow => @panic("Unable to parse Integer Literal! Something has gone terribly wrong\n"),
+                std.fmt.ParseIntError.InvalidCharacter => @panic("Unable to parse Integer Literal! Something has gone terribly wrong\n"),
+                else => |overflow| return overflow,
+            };
+            return self.add_node(.{
+                .tag = .INTEGER_LITERAL,
+                .main_token = self.next_token(),
+                .node_data = .{ .lhs = location, .rhs = 0 },
+            });
+        },
+        .FALSE => return self.add_node(.{
             .tag = .BOOLEAN_LITERAL, //
             .main_token = self.next_token(),
-            .node_data = .{ .lhs = undefined, .rhs = undefined },
+            .node_data = .{ .lhs = 0, .rhs = 0 },
+        }),
+        .TRUE => return self.add_node(.{
+            .tag = .BOOLEAN_LITERAL, //
+            .main_token = self.next_token(),
+            .node_data = .{ .lhs = 1, .rhs = 0 },
         }),
         .LPAREN => {
             _ = self.next_token();
@@ -376,8 +401,8 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
             .tag = .IDENTIFIER, //
             .main_token = next_tok,
             .node_data = .{
-                .lhs = undefined, //
-                .rhs = undefined,
+                .lhs = 0, //
+                .rhs = 0,
             },
         });
         if (self.is_current_token(.RPAREN)) break;
@@ -566,6 +591,16 @@ fn is_next_token(self: *Parser, tag: token.TokenType) bool {
     return self.token_current < self.token_ends.len - 1 and self.token_tags[self.token_current + 1] == tag;
 }
 
+fn register_integer_literal(self: *Parser) !u32 {
+    std.debug.assert(self.is_current_token(.INT));
+    const tok_start = self.token_starts[self.token_current];
+    const tok_end = self.token_ends[self.token_current];
+    const value = try std.fmt.parseInt(i64, self.source_buffer[tok_start..tok_end], 0);
+    const location = @as(u32, @intCast(self.integer_literal_program_memory.items.len));
+    try self.integer_literal_program_memory.append(self.allocator, value);
+    return location;
+}
+
 pub fn print_parser_errors_to_stdout(ast: *const Ast, stdout: anytype) !void {
     for (ast.errors) |err| {
         const tok = ast.tokens.get(err.token);
@@ -624,8 +659,8 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -636,14 +671,14 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 3,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -654,14 +689,14 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 6,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BOOLEAN_LITERAL, //
             .expectedMainToken = 8,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -672,18 +707,20 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BOOLEAN_LITERAL, //
             .expectedMainToken = 13,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
     };
 
-    try parser_testing_test_ast(&ast, tests, false);
+    const int_literals = [_]i64{10};
+
+    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
 test "parse_test_var_decl_errors" {
@@ -755,48 +792,50 @@ test "parser_test_return_stmt" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 2,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 1,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 3,
             .expectedDataLHS = 4,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 4,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 6,
             .expectedDataLHS = 6,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
     };
 
-    try parser_testing_test_ast(&ast, tests, false);
+    const int_literals = [_]i64{ 5, 10 };
+
+    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
 test "parser_test_identifer" {
@@ -813,24 +852,26 @@ test "parser_test_identifer" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 2,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
     };
 
-    try parser_testing_test_ast(&ast, tests, false);
+    const int_literals = [_]i64{};
+
+    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
 test "parser_test_int_literal" {
@@ -847,24 +888,26 @@ test "parser_test_int_literal" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 2,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
     };
 
-    try parser_testing_test_ast(&ast, tests, false);
+    const int_literals = [_]i64{15};
+
+    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
 test "parser_test_prefix_operators" {
@@ -884,151 +927,153 @@ test "parser_test_prefix_operators" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 3,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 1,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BOOL_NOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 2,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 3,
             .expectedDataLHS = 6,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 4,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .NEGATION, //
             .expectedMainToken = 3,
             .expectedDataLHS = 5,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
     };
 
-    try parser_testing_test_ast(&ast, tests, false);
+    const int_literals = [_]i64{ 15, 25 };
+
+    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
 test "parser_test_infix_operators" {
     const tests = [_]struct { input: [:0]const u8, expected: [:0]const u8 }{
         .{
             .input = "-a * b", //
-            .expected = "((-a) * b)",
+            .expected = "((-a) * b);",
         },
         .{
             .input = "!-a",
-            .expected = "(!(-a))",
+            .expected = "(!(-a));",
         },
         .{
             .input = "a + b + c",
-            .expected = "((a + b) + c)",
+            .expected = "((a + b) + c);",
         },
         .{
             .input = "a + b - c",
-            .expected = "((a + b) - c)",
+            .expected = "((a + b) - c);",
         },
         .{
             .input = "a * b * c",
-            .expected = "((a * b) * c)",
+            .expected = "((a * b) * c);",
         },
         .{
             .input = "a * b / c",
-            .expected = "((a * b) / c)",
+            .expected = "((a * b) / c);",
         },
         .{
             .input = "a + b / c",
-            .expected = "(a + (b / c))",
+            .expected = "(a + (b / c));",
         },
         .{
             .input = "a + b * c + d / e - f",
-            .expected = "(((a + (b * c)) + (d / e)) - f)",
+            .expected = "(((a + (b * c)) + (d / e)) - f);",
         },
-        // .{
-        //     .input = "3 + 4; -5 * 5",
-        //     .expected = "(3 + 4)((-5) * 5)",
-        // },
+        .{
+            .input = "3 + 4; -5 * 5",
+            .expected = "(3 + 4);((-5) * 5);",
+        },
         .{
             .input = "5 > 4 == 3 < 4",
-            .expected = "((5 > 4) == (3 < 4))",
+            .expected = "((5 > 4) == (3 < 4));",
         },
         .{
             .input = "5 < 4 != 3 > 4",
-            .expected = "((5 < 4) != (3 > 4))",
+            .expected = "((5 < 4) != (3 > 4));",
         },
         .{
             .input = "3 + 4 * 5 == 3 * 1 + 4 * 5",
-            .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))",
+            .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)));",
         },
         .{
             .input = "true",
-            .expected = "true",
+            .expected = "true;",
         },
         .{
             .input = "false",
-            .expected = "false",
+            .expected = "false;",
         },
         .{
             .input = "3 > 5 == false",
-            .expected = "((3 > 5) == false)",
+            .expected = "((3 > 5) == false);",
         },
         .{
             .input = "3 < 5 == true",
-            .expected = "((3 < 5) == true)",
+            .expected = "((3 < 5) == true);",
         },
         .{
             .input = "1 + (2 + 3) + 4",
-            .expected = "((1 + (2 + 3)) + 4)",
+            .expected = "((1 + (2 + 3)) + 4);",
         },
         .{
             .input = "(5 + 5) * 2",
-            .expected = "((5 + 5) * 2)",
+            .expected = "((5 + 5) * 2);",
         },
         .{
-            .input = "2 / (5 + 5)",
-            .expected = "(2 / (5 + 5))",
+            .input = "2 / (5 + 5);",
+            .expected = "(2 / (5 + 5));",
         },
         .{
-            .input = "(5 + 5) * 2 * (5 + 5)",
-            .expected = "(((5 + 5) * 2) * (5 + 5))",
+            .input = "(5 + 5) * 2 * (5 + 5);",
+            .expected = "(((5 + 5) * 2) * (5 + 5));",
         },
         .{
-            .input = "-(5 + 5)",
-            .expected = "(-(5 + 5))",
+            .input = "-(5 + 5);",
+            .expected = "(-(5 + 5));",
         },
         .{
-            .input = "!(true == true)",
-            .expected = "(!(true == true))",
+            .input = "!(true == true);",
+            .expected = "(!(true == true));",
         },
         .{
             .input = "a + add(b * c) + d",
-            .expected = "((a + add((b * c))) + d)",
+            .expected = "((a + add((b * c))) + d);",
         },
         .{
-            .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))",
-            .expected = "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)))",
+            .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8));",
+            .expected = "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)));",
         },
         .{
-            .input = "add(a + b + c * d / f + g)",
-            .expected = "add((((a + b) + ((c * d) / f)) + g))",
+            .input = "add(a + b + c * d / f + g);",
+            .expected = "add((((a + b) + ((c * d) / f)) + g));",
         },
     };
     for (tests, 0..) |t, i| {
@@ -1037,7 +1082,7 @@ test "parser_test_infix_operators" {
         defer ast.deinit(testing.allocator);
         var outlist = std.ArrayList(u8).init(testing.allocator);
         defer outlist.deinit();
-        try convert_ast_to_string(&ast, ast.nodes.len - 1, &outlist);
+        try convert_ast_to_string(&ast, 1, &outlist);
         outlist.shrinkRetainingCapacity(outlist.items.len);
         try testing.expectEqualSlices(u8, t.expected[0..t.expected.len], outlist.allocatedSlice()[0..outlist.items.len]);
         // std.debug.print("Index: {d}\r\n", .{i});
@@ -1053,11 +1098,12 @@ test "parser_test_if_else_block" {
         \\      var b = 10;
         \\ } else {
         \\      var b = 15;
-        \\ }
+        \\ };
     ;
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
 
+    try Parser.print_parser_errors_to_stderr(&ast);
     const tests = [_]struct {
         expectedNodeType: Ast.Node.Tag, //
         expectedMainToken: Ast.TokenArrayIndex,
@@ -1067,8 +1113,8 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1079,20 +1125,20 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 5,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .LESS_THAN, //
@@ -1109,14 +1155,14 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 13,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BLOCK, //
@@ -1133,14 +1179,14 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 19,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 21,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BLOCK, //
@@ -1157,18 +1203,21 @@ test "parser_test_if_else_block" {
     };
 
     const test_extra_data = [_]u32{ 6, 10, 9, 13 };
-    try parser_testing_test_extra(&ast, tests, test_extra_data, false);
+    const int_literals = [_]i64{ 10, 15 };
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_test_naked_if" {
     const input =
         \\ const a = if ( a < b) {
         \\      var b = 10;
-        \\ }
+        \\ };
     ;
     var ast = try Parser.parse_program(input, testing.allocator);
     defer ast.deinit(testing.allocator);
 
+    try Parser.print_parser_errors_to_stderr(&ast);
     const tests = [_]struct {
         expectedNodeType: Ast.Node.Tag, //
         expectedMainToken: Ast.TokenArrayIndex,
@@ -1178,8 +1227,8 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1190,20 +1239,20 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 5,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .LESS_THAN, //
@@ -1220,14 +1269,14 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 13,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BLOCK, //
@@ -1245,7 +1294,9 @@ test "parser_test_naked_if" {
 
     const test_extra_data = [_]u32{6};
 
-    try parser_testing_test_extra(&ast, tests, test_extra_data, false);
+    const int_literals = [_]i64{10};
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_test_function_expression" {
@@ -1266,26 +1317,26 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 10,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 2,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 4,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
@@ -1297,7 +1348,7 @@ test "parser_test_function_expression" {
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 7,
             .expectedDataLHS = 8,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
@@ -1308,8 +1359,8 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 10,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .ADDITION, //
@@ -1333,7 +1384,9 @@ test "parser_test_function_expression" {
 
     const test_extra_data = [_]u32{5};
 
-    try parser_testing_test_extra(&ast, tests, test_extra_data, false);
+    const int_literals = [_]i64{};
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_test_function_empty_param" {
@@ -1354,20 +1407,20 @@ test "parser_test_function_empty_param" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 5,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
             .expectedMainToken = 4,
             .expectedDataLHS = 3,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1391,7 +1444,9 @@ test "parser_test_function_empty_param" {
 
     const test_extra_data = [_]u32{2};
 
-    try parser_testing_test_extra(&ast, tests, test_extra_data, false);
+    const int_literals = [_]i64{10};
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_test_function_call_expr" {
@@ -1410,20 +1465,20 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 9,
-            .expectedDataRHS = undefined,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 0,
-            .expectedDataLHS = undefined,
-            .expectedDataRHS = undefined,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1434,7 +1489,7 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 4,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1446,13 +1501,13 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 8,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 2,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 10,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 3,
             .expectedDataRHS = 0,
         },
         .{
@@ -1471,26 +1526,36 @@ test "parser_test_function_call_expr" {
 
     const test_extra_data = [_]u32{ 6, 7, 0, 2, 3, 4, 8, 4, 7 };
 
-    try parser_testing_test_extra(&ast, tests, test_extra_data, false);
+    const int_literals = [_]i64{ 1, 2, 3, 4 };
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
-fn parser_testing_test_ast(ast: *Ast, test_nodes: anytype, enable_debug: bool) !void {
+fn parser_testing_test_ast(ast: *Ast, test_nodes: anytype, int_literals: []const i64, enable_debug: bool) !void {
     try testing.expectEqual(test_nodes.len, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
+
+    try testing.expectEqual(int_literals.len, ast.integer_literals.len);
+    try testing.expectEqualSlices(i64, int_literals[0..], ast.integer_literals);
 
     try testing_check_nodes(ast, test_nodes, enable_debug);
 }
 
-fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytype, enable_debug: bool) !void {
+fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytype, int_literals: []const i64, enable_debug: bool) !void {
     try testing.expectEqual(test_nodes.len, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
     try testing.expectEqual(test_extras.len, ast.extra_data.len);
     try testing.expectEqualSlices(u32, ast.extra_data[0..ast.extra_data.len], &test_extras);
+    try testing.expectEqual(int_literals.len, ast.integer_literals.len);
+    try testing.expectEqualSlices(i64, int_literals[0..], ast.integer_literals);
 
     try testing_check_nodes(ast, test_nodes, enable_debug);
 }
 
 pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
+    if (root_node >= ast.nodes.len) {
+        return;
+    }
     const node = ast.nodes.get(root_node);
     switch (node.tag) {
         .MULTIPLY, //
@@ -1557,6 +1622,7 @@ pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u
             try list.appendSlice(" ");
             try convert_ast_to_string(ast, node.node_data.rhs, list);
             try list.appendSlice(";");
+            try convert_ast_to_string(ast, node.node_data.rhs + 1, list);
         },
         .RETURN_STATEMENT => {
             try list.appendSlice(get_token_literal(ast, node.main_token));
@@ -1566,6 +1632,8 @@ pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u
         },
         .EXPRESSION_STATEMENT => {
             try convert_ast_to_string(ast, node.node_data.lhs, list);
+            try list.appendSlice(";");
+            try convert_ast_to_string(ast, node.node_data.lhs + 1, list);
         },
         else => {},
     }
