@@ -57,6 +57,11 @@ pub const Node = struct {
         /// lhs = return expression node;
         /// rhs = 0;
         RETURN_STATEMENT,
+        /// Assign
+        /// main_token = =
+        /// lhs = identifier to store expression result into
+        /// rhs = expression
+        ASSIGNMENT_STATEMENT,
         /// Expression statement
         /// <expression>;
         /// lhs = expression start node;

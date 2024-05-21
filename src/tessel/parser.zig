@@ -140,25 +140,69 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
                 else => |overflow| return overflow,
             };
         },
-        else => escape: {
-            const expr_node = try self.add_node(.{
-                .tag = .EXPRESSION_STATEMENT, //
-                .main_token = self.token_current,
-                .node_data = .{ .lhs = 0, .rhs = 0 },
-            });
-            const node = self.parse_expression() catch |err| switch (err) {
-                Error.ParsingError => {
-                    self.print_last_error();
-                    break :escape;
-                },
-                else => |overflow| return overflow,
-            };
-            _ = self.eat_token(.SEMICOLON);
-            self.nodes.items(.node_data)[expr_node].lhs = node;
-            return expr_node;
+        else => {
+            if (self.is_current_token(.IDENT)) {
+                return try self.maybe_parse_assign_statement();
+            } else {
+                return try self.parse_expression_statement();
+            }
         },
     }
     return null_node;
+}
+
+fn parse_expression_statement(self: *Parser) Error!Ast.Node.NodeIndex {
+    const expr_node = try self.add_node(.{
+        .tag = .EXPRESSION_STATEMENT, //
+        .main_token = self.token_current,
+        .node_data = .{ .lhs = 0, .rhs = 0 },
+    });
+    const node = self.parse_expect_expression() catch |err| switch (err) {
+        Error.ParsingError => {
+            self.print_last_error();
+            return null_node;
+        },
+        else => |overflow| return overflow,
+    };
+    _ = self.eat_token(.SEMICOLON);
+    self.nodes.items(.node_data)[expr_node].lhs = node;
+    return expr_node;
+}
+
+fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
+    std.debug.assert(self.is_current_token(.IDENT));
+    const next_tok = self.peek_next_token_tag() orelse {
+        return self.parse_expression_statement();
+    };
+    // TODO: Add .COMMA here and have multi variable assignment
+    switch (next_tok) {
+        .ASSIGN => {},
+        else => return self.parse_expression_statement(),
+    }
+    const ident_token = try self.expect_token(.IDENT);
+
+    const assign_token = try self.expect_token(.ASSIGN);
+    const assign_node = try self.add_node(.{
+        .tag = .ASSIGNMENT_STATEMENT,
+        .main_token = assign_token,
+        .node_data = .{
+            .lhs = 0,
+            .rhs = 0,
+        },
+    });
+    const ident_node = try self.add_node(.{
+        .tag = .IDENTIFIER,
+        .main_token = ident_token,
+        .node_data = .{
+            .lhs = 0,
+            .rhs = 0,
+        },
+    });
+    const expression = try self.parse_expect_expression();
+    self.nodes.items(.node_data)[assign_node].lhs = ident_node;
+    self.nodes.items(.node_data)[assign_node].rhs = expression;
+    _ = self.eat_token(.SEMICOLON);
+    return assign_node;
 }
 
 fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -200,7 +244,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
 
     _ = self.eat_token(.ASSIGN);
 
-    const rhs = try self.parse_expression();
+    const rhs = try self.parse_expect_expression();
     if (rhs == 0) {
         return node;
     }
@@ -219,7 +263,7 @@ fn parse_return_statement(self: *Parser) Error!Ast.Node.NodeIndex {
         },
     });
 
-    const lhs = try self.parse_expression();
+    const lhs = try self.parse_expect_expression();
     if (lhs == 0) {
         return node;
     }
@@ -254,7 +298,7 @@ const OperatorHierarchy = std.enums.directEnumArrayDefault(token.TokenType, Oper
     .LPAREN = .{ .precedence = 110, .tag = .FUNCTION_CALL },
 });
 
-fn parse_expression(self: *Parser) Error!Ast.Node.NodeIndex {
+fn parse_expect_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     const node = try self.parse_expression_precedence(0);
     if (node == 0) {
         try self.add_error(.{
@@ -457,7 +501,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     _ = try self.expect_token(.IF);
     _ = try self.expect_token(.LPAREN);
 
-    const condition = try self.parse_expression();
+    const condition = try self.parse_expect_expression();
     if (condition == null_node) {
         return null_node;
     }
@@ -543,7 +587,7 @@ fn parse_function_call(self: *Parser, function_name: Ast.Node.NodeIndex, op: Ast
     // in a contiguous manner and wont have junk data from a child call
     defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
     while (true) {
-        const arg = try self.parse_expression();
+        const arg = try self.parse_expect_expression();
         if (arg == 0) {
             try self.add_error(.{
                 .tag = .expected_expression, //
@@ -611,6 +655,13 @@ fn next_token(self: *Parser) Ast.TokenArrayIndex {
     const result = self.token_current;
     self.token_current += 1;
     return result;
+}
+
+fn peek_next_token_tag(self: *Parser) ?token.TokenType {
+    if (self.token_current >= self.token_tags.len - 1) {
+        return null;
+    }
+    return self.token_tags[self.token_current + 1];
 }
 
 fn eat_token(self: *Parser, tag: token.TokenType) ?Ast.TokenArrayIndex {
@@ -892,6 +943,81 @@ test "parser_test_return_stmt" {
     try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
 }
 
+test "parser_test_assignement_stmt" {
+    const input =
+        \\ b = fn(c) { c }
+    ;
+
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .ASSIGNMENT_STATEMENT, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 8,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 4,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
+            .expectedMainToken = 2,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 7,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 7,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .BLOCK, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 1,
+        },
+        .{
+            .expectedNodeType = .FUNCTION_EXPRESSION, //
+            .expectedMainToken = 2,
+            .expectedDataLHS = 4,
+            .expectedDataRHS = 7,
+        },
+    };
+
+    const test_extras = [_]Ast.Node.NodeIndex{5};
+    const int_literals = [_]i64{};
+
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
+}
 test "parser_test_identifer" {
     const input = "foobar;";
     var ast = try Parser.parse_program(input, testing.allocator);
@@ -1694,6 +1820,13 @@ pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u
             try convert_ast_to_string(ast, node.node_data.lhs, list);
             try list.appendSlice(";");
             try convert_ast_to_string(ast, node.node_data.lhs + 1, list);
+        },
+        .ASSIGNMENT_STATEMENT => {
+            try list.appendSlice("(");
+            try convert_ast_to_string(ast, node.node_data.lhs, list);
+            try list.appendSlice("=");
+            try convert_ast_to_string(ast, node.node_data.lhs + 1, list);
+            try list.appendSlice(")");
         },
         else => {},
     }
