@@ -1,16 +1,41 @@
 pub const Parser = @This();
 
+/// The parser holds a reference to the source code to reference in case of errors
 source_buffer: [:0]const u8,
+/// The allocator to be used in all internal allocations
 allocator: std.mem.Allocator,
+/// List of token types for each array. Seperated here for ease of access
+/// so that we dont have to get a Token struct out of a multiArray every time
 token_tags: []const token.TokenType,
+/// The starting positions of the tokens in the source code
 token_starts: []const u32,
+/// The ending poistions of all the tokens in the source code
 token_ends: []const u32,
 
+/// The current index in the token array we are parsing
 token_current: Ast.TokenArrayIndex,
 
+/// Multi array list of nodes that make up the AST
 nodes: Ast.NodeArrayType,
+/// A list of indicies that some expressions might need for extra storage.
+/// Some nodes in the AST cannot make do with just 2 children so for them this data exists so that
+/// one of the nodes can point to a location in this array and we can parse those nodes
 extra_data: std.ArrayListUnmanaged(Ast.Node.NodeIndex),
+/// In the function expression node and block nodes we are required to hold the list of statemnts
+/// locally before flushign it into the extra_data list to avoid interleaving with the parent function call
+/// This might happen for example if we have a function inside of a function
+///
+/// The scratch_pad exists as a intermediate buffer of data to store to before writing to extra_data
+/// this avoids having to create and destroy arraylists within the function calls themselves
+///
+/// This kind of data management is taken from zig's own Parser
+scratch_pad: std.ArrayListUnmanaged(Ast.Node.NodeIndex),
+/// A list to store all the parsing errors we encounter.
 errors: std.ArrayListUnmanaged(Ast.Error),
+/// When we go on to evaluate the program integer literals will have to be converted from strings to int.
+/// To avoid having to do this conversion many times especially in repeated function calls we are trading off
+/// a bit more space in the AST by converting integer literals as they are parsed and pointing to a location
+/// in this array. This results in at worst the same number of string to int calls.
 integer_literal_program_memory: std.ArrayListUnmanaged(i64),
 
 /// Since the root node does not have any data and is always at 0 we can use 0 as a null value
@@ -44,6 +69,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
         .nodes = .{},
         .errors = .{},
         .extra_data = .{},
+        .scratch_pad = .{},
         .integer_literal_program_memory = .{},
     };
     defer parser.deinit(allocator);
@@ -67,6 +93,7 @@ pub fn deinit(self: *Parser, allocator: Allocator) void {
     self.nodes.deinit(allocator);
     self.errors.deinit(allocator);
     self.extra_data.deinit(allocator);
+    self.scratch_pad.deinit(allocator);
     self.integer_literal_program_memory.deinit(allocator);
 }
 
@@ -120,7 +147,10 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
                 .node_data = .{ .lhs = 0, .rhs = 0 },
             });
             const node = self.parse_expression() catch |err| switch (err) {
-                Error.ParsingError => break :escape,
+                Error.ParsingError => {
+                    self.print_last_error();
+                    break :escape;
+                },
                 else => |overflow| return overflow,
             };
             _ = self.eat_token(.SEMICOLON);
@@ -174,7 +204,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
     if (rhs == 0) {
         return node;
     }
-    _ = try self.expect_token(.SEMICOLON);
+    _ = self.eat_token(.SEMICOLON) orelse null;
     self.nodes.items(.node_data)[node].rhs = rhs;
     return node;
 }
@@ -193,7 +223,7 @@ fn parse_return_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     if (lhs == 0) {
         return node;
     }
-    _ = try self.expect_token(.SEMICOLON);
+    _ = self.eat_token(.SEMICOLON) orelse null;
     self.nodes.items(.node_data)[node].lhs = lhs;
 
     return node;
@@ -243,6 +273,7 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
     std.debug.assert(min_presedence >= 0);
 
     var cur_node = try self.parse_prefix();
+
     if (cur_node == null_node) {
         return null_node;
     }
@@ -461,24 +492,29 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 
 fn parse_block(self: *Parser) Error!Ast.Node.NodeIndex {
     const left_brace = try self.expect_token(.LBRACE);
-    const start_point = self.extra_data.items.len;
+
+    const scratch_top = self.scratch_pad.items.len;
+    defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
+
     // We will keep looping through statements till we encounter a closing brace
     while (true) {
         if (self.is_current_token(.RBRACE)) {
             break;
         }
         const statement = try self.parse_statement();
-        try self.extra_data.append(self.allocator, statement);
+        if (statement == 0) {
+            break;
+        }
+        try self.scratch_pad.append(self.allocator, statement);
     }
-    const end_point = self.extra_data.items.len;
-    _ = self.eat_token(.RBRACE) orelse null;
-
+    _ = try self.expect_token(.RBRACE);
+    const extra_data_loc = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
     return self.add_node(.{
         .tag = .BLOCK, //
         .main_token = left_brace,
         .node_data = .{
-            .lhs = @as(u32, @intCast(start_point)), //
-            .rhs = @as(u32, @intCast(end_point)),
+            .lhs = @as(u32, @intCast(extra_data_loc.start)), //
+            .rhs = @as(u32, @intCast(extra_data_loc.end)),
         },
     });
 }
@@ -501,9 +537,11 @@ fn parse_function_call(self: *Parser, function_name: Ast.Node.NodeIndex, op: Ast
     // and only after we ahve parsed all the arguments do we dump it into the list
     // so we will always have a contiguous list of values
     // node1, ..nodeN, start, end in the extra_data array
-    var local_array = std.ArrayListUnmanaged(u32){};
-    defer local_array.deinit(self.allocator);
-
+    const scratch_top = self.scratch_pad.items.len;
+    // We want to shrink the scratch_pad back down to the size we started with at the end of
+    // our operations here so that the parent functin call can continue writing to the scratchpad
+    // in a contiguous manner and wont have junk data from a child call
+    defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
     while (true) {
         const arg = try self.parse_expression();
         if (arg == 0) {
@@ -514,25 +552,32 @@ fn parse_function_call(self: *Parser, function_name: Ast.Node.NodeIndex, op: Ast
             });
             continue;
         }
-        try local_array.append(self.allocator, arg);
+        try self.scratch_pad.append(self.allocator, arg);
         if (self.is_current_token(.RPAREN)) break;
         _ = try self.expect_token(.COMMA);
     }
-
-    try self.extra_data.appendSlice(self.allocator, local_array.items[0..local_array.items.len]);
-    const local_arr_len = @as(u32, @intCast(local_array.items.len));
-    const end = @as(u32, @intCast(self.extra_data.items.len));
-    try self.extra_data.append(self.allocator, end - local_arr_len);
-    try self.extra_data.append(self.allocator, end);
+    const extra_data_locs = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
+    try self.extra_data.append(self.allocator, extra_data_locs.start);
+    try self.extra_data.append(self.allocator, extra_data_locs.end);
     _ = self.eat_token(.RPAREN);
     return self.add_node(.{
         .tag = .FUNCTION_CALL, //
         .main_token = op,
         .node_data = .{
             .lhs = function_name, //
-            .rhs = end,
+            .rhs = extra_data_locs.end,
         },
     });
+}
+
+fn append_slice_to_extra_data(self: *Parser, slice: []const Ast.Node.NodeIndex) !Ast.Node.ExtraDataRange {
+    try self.extra_data.appendSlice(self.allocator, slice);
+    const slice_len = @as(Ast.Node.NodeIndex, @intCast(slice.len));
+    const end = @as(Ast.Node.NodeIndex, @intCast(self.extra_data.items.len));
+    return Ast.Node.ExtraDataRange{
+        .start = end - slice_len,
+        .end = end,
+    };
 }
 
 fn add_node(self: *Parser, node: Ast.Node) Allocator.Error!Ast.Node.NodeIndex {
@@ -587,8 +632,17 @@ fn eat_token_till(self: *Parser, tag: token.TokenType) Ast.TokenArrayIndex {
 fn is_current_token(self: *Parser, tag: token.TokenType) bool {
     return self.token_current < self.token_ends.len and self.token_tags[self.token_current] == tag;
 }
+
 fn is_next_token(self: *Parser, tag: token.TokenType) bool {
     return self.token_current < self.token_ends.len - 1 and self.token_tags[self.token_current + 1] == tag;
+}
+
+fn print_last_error(self: *Parser) void {
+    const len = self.errors.items.len;
+    if (len > 0) {
+        const err_node = self.errors.getLast();
+        std.debug.print("Parsing error: {any}", .{err_node});
+    }
 }
 
 fn register_integer_literal(self: *Parser) !u32 {
@@ -1552,10 +1606,16 @@ fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytyp
     try testing_check_nodes(ast, test_nodes, enable_debug);
 }
 
+pub const ParseToStringError = error{ParseToStringError};
 pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
     if (root_node >= ast.nodes.len) {
         return;
     }
+
+    if (root_node == 0) {
+        return ParseToStringError.ParseToStringError;
+    }
+
     const node = ast.nodes.get(root_node);
     switch (node.tag) {
         .MULTIPLY, //

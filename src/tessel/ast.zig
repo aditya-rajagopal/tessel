@@ -39,6 +39,11 @@ pub const Node = struct {
     node_data: NodeData,
 
     pub const NodeIndex = u32;
+    /// Useful when storing information into the extra_data array
+    pub const ExtraDataRange = struct {
+        start: NodeIndex,
+        end: NodeIndex,
+    };
     pub const Tag = enum {
         /// The root node type
         ROOT,

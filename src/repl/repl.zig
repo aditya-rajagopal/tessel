@@ -54,7 +54,17 @@ pub fn start() !void {
 
             var outlist = std.ArrayList(u8).init(allocator);
             defer outlist.deinit();
-            try Parser.convert_ast_to_string(&ast, 1, &outlist);
+
+            Parser.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
+                Parser.ParseToStringError.ParseToStringError => {
+                    std.debug.print(
+                        "Error parsing AST to string: Encountered an endless loop in AST where the lhs of one of the statements is 0\n",
+                        .{},
+                    );
+                },
+                else => |overflow| return overflow,
+            };
+
             outlist.shrinkRetainingCapacity(outlist.items.len);
             try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
 
