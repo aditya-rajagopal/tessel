@@ -55,8 +55,8 @@ pub fn start() !void {
             var outlist = std.ArrayList(u8).init(allocator);
             defer outlist.deinit();
 
-            Parser.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
-                Parser.ParseToStringError.ParseToStringError => {
+            Evaluator.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
+                Evaluator.Error.ReferencingNodeZero => {
                     std.debug.print(
                         "Error parsing AST to string: Encountered an endless loop in AST where the lhs of one of the statements is 0\n",
                         .{},
@@ -68,16 +68,38 @@ pub fn start() !void {
             outlist.shrinkRetainingCapacity(outlist.items.len);
             try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
 
-            for (0..ast.nodes.len) |i| {
-                const n = ast.nodes.get(i);
-                try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-            }
+            const output = try Evaluator.evaluate_program(&ast, allocator);
+            const outstr = output.ToString(allocator) catch |err| switch (err) {
+                Evaluator.Error.NonStringifibaleObject => {
+                    try stdout.print("Unable to parse this program yet!\n", .{});
+                    try bw.flush();
+                    continue;
+                },
+                else => |overflow| return overflow,
+            };
 
-            try stdout.print("Extra Data: ", .{});
-            for (0..ast.extra_data.len) |i| {
-                const n = ast.extra_data[i];
-                try stdout.print("{}, ", .{n});
+            switch (output) {
+                .integer => {
+                    defer allocator.free(outstr);
+                    defer allocator.destroy(output.integer);
+                    try stdout.print("Output >> {s}\n", .{outstr});
+                },
+                .boolean => {
+                    defer allocator.destroy(output.boolean);
+                    try stdout.print("Output >> {s}\n", .{outstr});
+                },
+                inline else => {},
             }
+            // for (0..ast.nodes.len) |i| {
+            //     const n = ast.nodes.get(i);
+            //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
+            // }
+            //
+            // try stdout.print("Extra Data: ", .{});
+            // for (0..ast.extra_data.len) |i| {
+            //     const n = ast.extra_data[i];
+            //     try stdout.print("{}, ", .{n});
+            // }
 
             try stdout.print("\n", .{});
 
@@ -99,3 +121,4 @@ fn print_header(stdout: anytype) !void {
 const std = @import("std");
 const lexer = @import("../tessel/lexer.zig");
 const Parser = @import("../tessel/parser.zig");
+const Evaluator = @import("../tessel/evaluator.zig");

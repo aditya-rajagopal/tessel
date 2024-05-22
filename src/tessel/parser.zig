@@ -1732,111 +1732,6 @@ fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytyp
     try testing_check_nodes(ast, test_nodes, enable_debug);
 }
 
-pub const ParseToStringError = error{ParseToStringError};
-pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
-    if (root_node >= ast.nodes.len) {
-        return;
-    }
-
-    if (root_node == 0) {
-        return ParseToStringError.ParseToStringError;
-    }
-
-    const node = ast.nodes.get(root_node);
-    switch (node.tag) {
-        .MULTIPLY, //
-        .ADDITION,
-        .SUBTRACTION,
-        .DIVIDE,
-        .LESS_THAN,
-        .GREATER_THAN,
-        => {
-            try list.append('(');
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.append(' ');
-            try list.appendSlice(Ast.Node.Tag.get_operator_string(node.tag));
-            try list.append(' ');
-            try convert_ast_to_string(ast, node.node_data.rhs, list);
-            try list.append(')');
-        },
-
-        .GREATER_THAN_EQUAL,
-        .LESS_THAN_EQUAL,
-        .DOUBLE_EQUAL,
-        .NOT_EQUAL,
-        => {
-            try list.append('(');
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.append(' ');
-            const op_str = Ast.Node.Tag.get_operator_string(node.tag);
-            std.debug.assert(op_str.len == 2);
-            try list.appendSlice(op_str);
-            try list.append(' ');
-            try convert_ast_to_string(ast, node.node_data.rhs, list);
-            try list.append(')');
-        },
-        .INTEGER_LITERAL, .IDENTIFIER, .BOOLEAN_LITERAL => {
-            try list.appendSlice(get_token_literal(ast, node.main_token));
-        },
-        .NEGATION, .BOOL_NOT => {
-            try list.append('(');
-            try list.appendSlice(Ast.Node.Tag.get_operator_string(node.tag));
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.append(')');
-        },
-        .FUNCTION_CALL => {
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.appendSlice("(");
-            if (node.node_data.rhs != 0) {
-                const start = ast.extra_data[node.node_data.rhs];
-                const end = ast.extra_data[node.node_data.rhs + 1];
-                for (start..end) |i| {
-                    try convert_ast_to_string(ast, ast.extra_data[i], list);
-                    try list.appendSlice(", ");
-                }
-                _ = list.pop();
-                _ = list.pop();
-            }
-            try list.appendSlice(")");
-        },
-        .VAR_STATEMENT => {
-            try list.appendSlice(get_token_literal(ast, node.main_token));
-            try list.appendSlice(" ");
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.appendSlice(" ");
-            try list.appendSlice("=");
-            try list.appendSlice(" ");
-            try convert_ast_to_string(ast, node.node_data.rhs, list);
-            try list.appendSlice(";");
-            try convert_ast_to_string(ast, node.node_data.rhs + 1, list);
-        },
-        .RETURN_STATEMENT => {
-            try list.appendSlice(get_token_literal(ast, node.main_token));
-            try list.appendSlice(" ");
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.appendSlice(";");
-        },
-        .EXPRESSION_STATEMENT => {
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.appendSlice(";");
-            try convert_ast_to_string(ast, node.node_data.lhs + 1, list);
-        },
-        .ASSIGNMENT_STATEMENT => {
-            try list.appendSlice("(");
-            try convert_ast_to_string(ast, node.node_data.lhs, list);
-            try list.appendSlice("=");
-            try convert_ast_to_string(ast, node.node_data.lhs + 1, list);
-            try list.appendSlice(")");
-        },
-        else => {},
-    }
-}
-
-fn get_token_literal(ast: *Ast, tok_loc: Ast.TokenArrayIndex) []const u8 {
-    const tok = ast.tokens.get(tok_loc);
-    return ast.source_buffer[tok.start..tok.end];
-}
-
 fn testing_check_nodes(ast: *Ast, tests: anytype, enable_debug: bool) !void {
     for (0..ast.nodes.len) |node| {
         const n = ast.nodes.get(node);
@@ -1857,3 +1752,4 @@ const Lexer = @import("lexer.zig");
 const Ast = @import("ast.zig");
 const token = @import("token.zig");
 const Allocator = std.mem.Allocator;
+const convert_ast_to_string = @import("evaluator.zig").convert_ast_to_string;
