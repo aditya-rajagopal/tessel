@@ -12,7 +12,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    b.installArtifact(exe);
+    const install = b.addInstallArtifact(exe, .{
+        .dest_dir = .{
+            .override = .{ .custom = "../" },
+        },
+        .pdb_dir = .{
+            .override = .{ .custom = "./bin" },
+        },
+    });
+    b.default_step.dependOn(&install.step);
 
     const run_cmd = b.addRunArtifact(exe);
 

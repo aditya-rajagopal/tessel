@@ -106,7 +106,8 @@ pub fn begin_parsing(self: *Parser) !void {
             .rhs = 0,
         },
     });
-
+    const scratch_top = self.scratch_pad.items.len;
+    defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
     while (true) {
         // Lexer.print_token(self.source_buffer, .{
         //     .type = self.token_tags[self.token_current], //
@@ -115,7 +116,10 @@ pub fn begin_parsing(self: *Parser) !void {
         //         .end = self.token_ends[self.token_current],
         //     },
         // }, "Parser#begin_parsing ");
-        _ = try self.parse_statement();
+        const node = try self.parse_statement();
+        if (node != null_node) {
+            try self.scratch_pad.append(self.allocator, node);
+        }
         if (self.is_current_token(.EOF)) {
             break;
         }
@@ -123,6 +127,9 @@ pub fn begin_parsing(self: *Parser) !void {
             break;
         }
     }
+    const extra_data_loc = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
+    self.nodes.items(.node_data)[0].lhs = extra_data_loc.start;
+    self.nodes.items(.node_data)[0].rhs = extra_data_loc.end;
 }
 
 fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
@@ -765,7 +772,7 @@ test "parser_test_var_decl" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -824,8 +831,8 @@ test "parser_test_var_decl" {
     };
 
     const int_literals = [_]i64{10};
-
-    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
+    const test_extras = [_]Ast.Node.NodeIndex{ 1, 4, 7 };
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parse_test_var_decl_errors" {
@@ -898,7 +905,7 @@ test "parser_test_return_stmt" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
@@ -940,7 +947,8 @@ test "parser_test_return_stmt" {
 
     const int_literals = [_]i64{ 5, 10 };
 
-    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
+    const test_extras = [_]Ast.Node.NodeIndex{ 1, 3, 5 };
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parser_test_assignement_stmt" {
@@ -960,8 +968,8 @@ test "parser_test_assignement_stmt" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .ASSIGNMENT_STATEMENT, //
@@ -1013,7 +1021,7 @@ test "parser_test_assignement_stmt" {
         },
     };
 
-    const test_extras = [_]Ast.Node.NodeIndex{5};
+    const test_extras = [_]Ast.Node.NodeIndex{ 5, 1 };
     const int_literals = [_]i64{};
 
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
@@ -1033,7 +1041,7 @@ test "parser_test_identifer" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1051,7 +1059,8 @@ test "parser_test_identifer" {
 
     const int_literals = [_]i64{};
 
-    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
+    const test_extras = [_]Ast.Node.NodeIndex{1};
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parser_test_int_literal" {
@@ -1069,7 +1078,7 @@ test "parser_test_int_literal" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1087,7 +1096,8 @@ test "parser_test_int_literal" {
 
     const int_literals = [_]i64{15};
 
-    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
+    const test_extras = [_]Ast.Node.NodeIndex{1};
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parser_test_prefix_operators" {
@@ -1108,7 +1118,7 @@ test "parser_test_prefix_operators" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1150,7 +1160,8 @@ test "parser_test_prefix_operators" {
 
     const int_literals = [_]i64{ 15, 25 };
 
-    try parser_testing_test_ast(&ast, tests, int_literals[0..], false);
+    const test_extras = [_]Ast.Node.NodeIndex{ 1, 4 };
+    try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parser_test_infix_operators" {
@@ -1293,8 +1304,8 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 4,
+            .expectedDataRHS = 5,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1382,7 +1393,7 @@ test "parser_test_if_else_block" {
         },
     };
 
-    const test_extra_data = [_]u32{ 6, 10, 9, 13 };
+    const test_extra_data = [_]u32{ 6, 10, 9, 13, 1 };
     const int_literals = [_]i64{ 10, 15 };
 
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
@@ -1407,8 +1418,8 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1472,7 +1483,7 @@ test "parser_test_naked_if" {
         },
     };
 
-    const test_extra_data = [_]u32{6};
+    const test_extra_data = [_]u32{ 6, 1 };
 
     const int_literals = [_]i64{10};
 
@@ -1497,8 +1508,8 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1562,7 +1573,7 @@ test "parser_test_function_expression" {
         },
     };
 
-    const test_extra_data = [_]u32{5};
+    const test_extra_data = [_]u32{ 5, 1 };
 
     const int_literals = [_]i64{};
 
@@ -1587,8 +1598,8 @@ test "parser_test_function_empty_param" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1622,7 +1633,7 @@ test "parser_test_function_empty_param" {
         },
     };
 
-    const test_extra_data = [_]u32{2};
+    const test_extra_data = [_]u32{ 2, 1 };
 
     const int_literals = [_]i64{10};
 
@@ -1645,8 +1656,8 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 9,
+            .expectedDataRHS = 10,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -1704,7 +1715,7 @@ test "parser_test_function_call_expr" {
         },
     };
 
-    const test_extra_data = [_]u32{ 6, 7, 0, 2, 3, 4, 8, 4, 7 };
+    const test_extra_data = [_]u32{ 6, 7, 0, 2, 3, 4, 8, 4, 7, 1 };
 
     const int_literals = [_]i64{ 1, 2, 3, 4 };
 

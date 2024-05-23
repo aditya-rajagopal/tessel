@@ -1,8 +1,41 @@
 pub const Evaluator = @This();
 
-pub const Error = error{ ReferencingNodeZero, NonStringifibaleObject } || Allocator.Error;
+pub const Error = error{ ReferencingNodeZero, IncorrectLiteralType } || object.Error;
 
-fn eval(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
+pub fn evaluate_program(ast: *Ast, allocator: Allocator) Error!Object {
+    const root_node = ast.nodes.get(0);
+    const num_statements = root_node.node_data.rhs - root_node.node_data.lhs;
+    const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
+
+    for (0..num_statements) |i| {
+        const obj = try eval_statement(ast, statements[i], allocator);
+        if (i == num_statements - 1) {
+            return obj;
+        }
+        obj.deinit(allocator);
+    }
+    return .null;
+}
+
+fn eval_statement(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
+    if (node >= ast.nodes.len) {
+        return .null;
+    }
+
+    if (node == 0) {
+        return Error.ReferencingNodeZero;
+    }
+
+    const ast_node = ast.nodes.get(node);
+    switch (ast_node.tag) {
+        .EXPRESSION_STATEMENT => {
+            return eval_expression(ast, ast_node.node_data.lhs, allocator);
+        },
+        else => return .null,
+    }
+}
+
+fn eval_expression(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
     if (node >= ast.nodes.len) {
         return .null;
     }
@@ -22,117 +55,166 @@ fn eval(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
             const obj = try Object.Create(.boolean, allocator, @ptrCast(&value));
             return obj;
         },
-        .EXPRESSION_STATEMENT => {
-            return eval(ast, ast_node.node_data.lhs, allocator);
+        .NEGATION, .BOOL_NOT => {
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            return eval_prefix_operation(ast_node.tag, left, allocator);
+        },
+        .DOUBLE_EQUAL,
+        .NOT_EQUAL,
+        => {
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
+            return eval_boolean_infix_operation(ast_node.tag, left, right, allocator);
+        },
+        .LESS_THAN,
+        .GREATER_THAN,
+        .LESS_THAN_EQUAL,
+        .GREATER_THAN_EQUAL,
+        .ADDITION,
+        .SUBTRACTION,
+        .MULTIPLY,
+        .DIVIDE,
+        => {
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
+            return eval_intint_infix_operation(ast_node.tag, left, right, allocator);
         },
         else => return .null,
     }
 }
-
-pub fn evaluate_program(ast: *Ast, allocator: Allocator) Error!Object {
-    return eval(ast, 1, allocator);
+fn eval_prefix_operation(tag: Ast.Node.Tag, value: Object, allocator: Allocator) Error!Object {
+    switch (tag) {
+        .BOOL_NOT => {
+            switch (value) {
+                .integer => |i| {
+                    defer value.deinit(allocator);
+                    const result = i.value == 0;
+                    const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+                    return obj;
+                },
+                .boolean => |b| {
+                    b.value = !b.value;
+                    return value;
+                },
+                inline else => return Error.IncorrectLiteralType,
+            }
+        },
+        .NEGATION => {
+            switch (value) {
+                .integer => |i| {
+                    i.value *= -1;
+                    return value;
+                },
+                inline else => {
+                    defer value.deinit(allocator);
+                    return Error.IncorrectLiteralType;
+                },
+            }
+        },
+        inline else => unreachable,
+    }
+    return value;
 }
 
-pub const ObjectTypes = enum {
-    integer,
-    boolean,
-    return_expression,
-    function_expression,
-    runtime_error,
-    null,
-};
-
-pub const ObjectStructures = struct {
-    pub const IntegerType = struct {
-        value: i64,
-    };
-
-    pub const BooleanType = struct {
-        value: bool,
-    };
-
-    pub const ReturnType = struct {
-        value: ReturnTypeUnion,
-    };
-
-    pub const FunctionExpressionType = struct {
-        value: FunctionValueType,
-    };
-
-    pub const RuntimeErrorType = struct {
-        value: []const u8,
-    };
-
-    pub const FunctionValueType = struct {
-        block_statements: Ast.Node.ExtraDataRange,
-        parameters: Ast.Node.ExtraDataRange,
-    };
-
-    pub const ReturnTypeUnion = union(enum) {
-        int: i64,
-        bool: bool,
-        err: RuntimeErrorType,
-        func: FunctionExpressionType,
-    };
-};
-
-pub const Object = union(ObjectTypes) {
-    integer: *ObjectStructures.IntegerType,
-    boolean: *ObjectStructures.BooleanType,
-    return_expression: *ObjectStructures.ReturnType,
-    function_expression: *ObjectStructures.FunctionExpressionType,
-    runtime_error: *ObjectStructures.RuntimeErrorType,
-    null,
-
-    pub fn Create(tag: ObjectTypes, allocator: Allocator, data: *const anyopaque) Error!Object {
-        switch (tag) {
-            .integer => {
-                const obj = try allocator.create(ObjectStructures.IntegerType);
-                const value: *const i64 = @ptrCast(@alignCast(data));
-                obj.value = value.*;
-                return Object{ .integer = obj };
-            },
-            .boolean => {
-                const obj = try allocator.create(ObjectStructures.BooleanType);
-                const value: *const bool = @ptrCast(@alignCast(data));
-                obj.value = value.*;
-                return Object{ .boolean = obj };
-            },
-            .return_expression => {
-                const obj = try allocator.create(ObjectStructures.ReturnType);
-                const value: *const ObjectStructures.ReturnTypeUnion = @ptrCast(@alignCast(data));
-                obj.value = value.*;
-                return Object{ .return_expression = obj };
-            },
-            .function_expression => {
-                const obj = try allocator.create(ObjectStructures.FunctionExpressionType);
-                const value: *const ObjectStructures.FunctionValueType = @ptrCast(@alignCast(data));
-                obj.value = value.*;
-                return Object{ .function_expression = obj };
-            },
-            .runtime_error => {
-                const obj = try allocator.create(ObjectStructures.RuntimeErrorType);
-                return Object{ .runtime_error = obj };
-            },
-            .null => {
-                return .null;
-            },
-        }
+fn eval_intint_infix_operation(tag: Ast.Node.Tag, left: Object, right: Object, allocator: Allocator) Error!Object {
+    defer left.deinit(allocator);
+    defer right.deinit(allocator);
+    const l = try left.get(.integer);
+    const r = try right.get(.integer);
+    switch (tag) {
+        .LESS_THAN => {
+            const result: bool = l.value < r.value;
+            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .GREATER_THAN => {
+            const result: bool = l.value > r.value;
+            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .LESS_THAN_EQUAL => {
+            const result: bool = l.value <= r.value;
+            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .GREATER_THAN_EQUAL => {
+            const result: bool = l.value >= r.value;
+            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .ADDITION => {
+            const result: i64 = l.value + r.value;
+            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .SUBTRACTION => {
+            const result: i64 = l.value - r.value;
+            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .MULTIPLY => {
+            const result: i64 = l.value * r.value;
+            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
+            return obj;
+        },
+        .DIVIDE => {
+            const result: i64 = @divFloor(l.value, r.value);
+            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
+            return obj;
+        },
+        inline else => unreachable,
     }
+    return .null;
+}
 
-    pub fn ToString(self: Object, allocator: Allocator) Error![]const u8 {
-        switch (self) {
-            .integer => |i| return std.fmt.allocPrint(allocator, "{d}", .{i.value}),
-            .boolean => |b| if (b.value) {
-                return "true";
-            } else {
-                return "false";
-            },
-            inline else => return Error.NonStringifibaleObject,
-        }
+fn eval_boolean_infix_operation(tag: Ast.Node.Tag, left: Object, right: Object, allocator: Allocator) Error!Object {
+    defer left.deinit(allocator);
+    defer right.deinit(allocator);
+    var result: bool = false;
+    switch (left) {
+        .integer => |il| {
+            switch (right) {
+                .integer => |ir| {
+                    switch (tag) {
+                        .DOUBLE_EQUAL => result = il.value == ir.value,
+                        .NOT_EQUAL => result = il.value != ir.value,
+                        inline else => unreachable,
+                    }
+                },
+                .boolean => |br| {
+                    switch (tag) {
+                        .DOUBLE_EQUAL => result = (il.value != 0) == br.value,
+                        .NOT_EQUAL => result = (il.value != 0) != br.value,
+                        inline else => unreachable,
+                    }
+                },
+                inline else => return Error.IncorrectLiteralType,
+            }
+        },
+        .boolean => |bl| {
+            switch (right) {
+                .integer => |ir| {
+                    switch (tag) {
+                        .DOUBLE_EQUAL => result = bl.value == (ir.value != 0),
+                        .NOT_EQUAL => result = bl.value != (ir.value != 0),
+                        inline else => unreachable,
+                    }
+                },
+                .boolean => |br| {
+                    switch (tag) {
+                        .DOUBLE_EQUAL => result = bl.value == br.value,
+                        .NOT_EQUAL => result = bl.value != br.value,
+                        inline else => unreachable,
+                    }
+                },
+                inline else => return Error.IncorrectLiteralType,
+            }
+        },
+        inline else => return Error.IncorrectLiteralType,
     }
-};
-
+    const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
+    return obj;
+}
 pub fn convert_ast_to_string(ast: *Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
     if (root_node >= ast.nodes.len) {
         return;
@@ -237,105 +319,97 @@ fn get_token_literal(ast: *Ast, tok_loc: Ast.TokenArrayIndex) []const u8 {
     return ast.source_buffer[tok.start..tok.end];
 }
 
-test "evaluator_object_test" {
-    const int_val: i64 = 41;
-    var int_obj = try Object.Create(.integer, testing.allocator, @ptrCast(&int_val));
-    defer testing.allocator.destroy(int_obj.integer);
-    // int_obj.integer.value = 41;
+const test_struct = struct {
+    source: [:0]const u8,
+    output: []const u8,
+};
 
-    switch (int_obj) {
-        .integer => |i| i.value += 1,
-        inline else => unreachable,
-    }
-    try testing.expect(int_obj.integer.value == 42);
+test "evaluate_booleans" {
+    const tests = [_]test_struct{
+        .{ .source = "true", .output = "true" },
+        .{ .source = "false", .output = "false" },
+        .{ .source = "1 < 2", .output = "true" },
+        .{ .source = "1 > 2", .output = "false" },
+        .{ .source = "1 < 1", .output = "false" },
+        .{ .source = "1 > 1", .output = "false" },
+        .{ .source = "1 == 1", .output = "true" },
+        .{ .source = "1 != 1", .output = "false" },
+        .{ .source = "1 == 2", .output = "false" },
+        .{ .source = "1 != 2", .output = "true" },
+        .{ .source = "true == true", .output = "true" },
+        .{ .source = "false == false", .output = "true" },
+        .{ .source = "true == false", .output = "false" },
+        .{ .source = "true != false", .output = "true" },
+        .{ .source = "false != true", .output = "true" },
+        .{ .source = "(1 < 2) == true", .output = "true" },
+        .{ .source = "(1 < 2) == false", .output = "false" },
+        .{ .source = "(1 > 2) == true", .output = "false" },
+        .{ .source = "(1 > 2) == false", .output = "true" },
+    };
 
-    const int_str = try int_obj.ToString(testing.allocator);
-    defer testing.allocator.free(int_str);
+    try eval_tests(&tests);
+}
 
-    try testing.expectEqualSlices(u8, "42", int_str);
-
-    const bool_value = false;
-    var bool_obj = try Object.Create(.boolean, testing.allocator, @ptrCast(&bool_value));
-    defer testing.allocator.destroy(bool_obj.boolean);
-    bool_obj.boolean.value = false;
-
-    switch (bool_obj) {
-        .boolean => |i| i.value = true,
-        inline else => unreachable,
-    }
-    try testing.expect(bool_obj.boolean.value);
-
-    const bool_string = try bool_obj.ToString(testing.allocator);
-    try testing.expectEqualSlices(u8, "true", bool_string);
-
-    const func_data: ObjectStructures.FunctionValueType = .{
-        .block_statements = .{
-            .start = 1,
-            .end = 2,
+test "evaluate_prefix_not" {
+    const tests = [_]test_struct{
+        .{
+            .source = "!5",
+            .output = "false",
         },
-        .parameters = .{
-            .start = 1,
-            .end = 2,
+        .{
+            .source = "!false",
+            .output = "true",
+        },
+        .{
+            .source = "!!true",
+            .output = "true",
+        },
+        .{
+            .source = "!!5",
+            .output = "true",
+        },
+        .{
+            .source = "!!!5",
+            .output = "false",
         },
     };
-    const func_obj = try Object.Create(.function_expression, testing.allocator, @ptrCast(&func_data));
-    defer testing.allocator.destroy(func_obj.function_expression);
 
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        func_obj.function_expression.value.parameters,
-    );
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        func_obj.function_expression.value.block_statements,
-    );
-    var function_parameters: Ast.Node.ExtraDataRange = undefined;
-    var function_block: Ast.Node.ExtraDataRange = undefined;
-    switch (func_obj) {
-        .function_expression => |f| {
-            function_parameters = f.value.parameters;
-            function_block = f.value.block_statements;
-        },
-        inline else => unreachable,
+    try eval_tests(&tests);
+}
+
+test "evaluate_integer_expressions" {
+    const tests = [_]test_struct{
+        .{ .source = "5", .output = "5" },
+        .{ .source = "10", .output = "10" },
+        .{ .source = "-5", .output = "-5" },
+        .{ .source = "-10", .output = "-10" },
+        .{ .source = "5 + 5 + 5 + 5 - 10", .output = "10" },
+        .{ .source = "2 * 2 * 2 * 2 * 2", .output = "32" },
+        .{ .source = "-50 + 100 + -50", .output = "0" },
+        .{ .source = "5 * 2 + 10", .output = "20" },
+        .{ .source = "5 + 2 * 10", .output = "25" },
+        .{ .source = "20 + 2 * -10", .output = "0" },
+        .{ .source = "50 / 2 * 2 + 10", .output = "60" },
+        .{ .source = "2 * (5 + 10)", .output = "30" },
+        .{ .source = "3 * 3 * 3 + 10", .output = "37" },
+        .{ .source = "3 * (3 * 3) + 10", .output = "37" },
+        .{ .source = "(5 + 10 * 2 + 15 / 3) * 2 + -10", .output = "50" },
+    };
+
+    try eval_tests(&tests);
+}
+
+fn eval_tests(tests: []const test_struct) !void {
+    var buffer: [1024]u8 = undefined;
+    for (tests) |t| {
+        var ast = try Parser.parse_program(t.source, testing.allocator);
+        defer ast.deinit(testing.allocator);
+
+        const output = try Evaluator.evaluate_program(&ast, testing.allocator);
+        defer output.deinit(testing.allocator);
+        const outstr = try output.ToString(&buffer);
+        try testing.expectEqualSlices(u8, t.output, outstr);
     }
-    try testing.expectEqualDeep(function_parameters, func_obj.function_expression.value.parameters);
-    try testing.expectEqualDeep(function_block, func_obj.function_expression.value.block_statements);
-
-    const return_data = ObjectStructures.ReturnTypeUnion{ .bool = true };
-    const return_obj = try Object.Create(.return_expression, testing.allocator, @ptrCast(&return_data));
-    defer testing.allocator.destroy(return_obj.return_expression);
-    return_obj.return_expression.value.bool = false;
-    try testing.expect(!return_obj.return_expression.value.bool);
-    switch (return_obj) {
-        .return_expression => |r| r.value.bool = true,
-        inline else => unreachable,
-    }
-    try testing.expect(return_obj.return_expression.value.bool);
-
-    try testing.expect(bool_obj.boolean.value);
-
-    var err_msg: []const u8 = undefined;
-    var err_obj = try Object.Create(.runtime_error, testing.allocator, "");
-    // err_obj.runtime_error.message = try std.fmt.allocPrint(testing.allocator, "{s}\n", .{"This is an error"});
-    err_obj.runtime_error.value = "This is an error";
-    // defer testing.allocator.free(err_obj.runtime_error.message);
-    defer testing.allocator.destroy(err_obj.runtime_error);
-
-    switch (err_obj) {
-        .runtime_error => |e| {
-            err_msg = e.value;
-        },
-        inline else => unreachable,
-    }
-    try testing.expectEqualSlices(u8, err_msg, err_obj.runtime_error.value);
-
-    const null_obj: Object = .null;
-    var identified = false;
-    switch (null_obj) {
-        .null => identified = true,
-        inline else => unreachable,
-    }
-    try testing.expect(identified);
 }
 
 const std = @import("std");
@@ -343,3 +417,8 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const token = @import("token.zig");
 const Ast = @import("ast.zig");
+const Parser = @import("parser.zig");
+const object = @import("object.zig");
+const Object = object.Object;
+const ObjectStructures = object.ObjectStructures;
+const ObjectTypes = object.ObjectTypes;

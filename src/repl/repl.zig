@@ -27,11 +27,13 @@ pub fn start() !void {
         }
     }
 
+    var buffer: [4096]u8 = undefined;
+    var msg_buf: [10240]u8 = undefined;
+
     while (true) {
         try stdout.print("{s}", .{PROMT});
         try bw.flush();
 
-        var msg_buf: [10240]u8 = undefined;
         const msg = try stdin.readUntilDelimiterOrEof(&msg_buf, '\n');
 
         if (msg) |m| {
@@ -52,44 +54,21 @@ pub fn start() !void {
             var ast = try Parser.parse_program(source_code[0..m.len :0], allocator);
             defer ast.deinit(allocator);
 
-            var outlist = std.ArrayList(u8).init(allocator);
-            defer outlist.deinit();
-
-            Evaluator.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
-                Evaluator.Error.ReferencingNodeZero => {
-                    std.debug.print(
-                        "Error parsing AST to string: Encountered an endless loop in AST where the lhs of one of the statements is 0\n",
-                        .{},
-                    );
-                },
-                else => |overflow| return overflow,
-            };
-
-            outlist.shrinkRetainingCapacity(outlist.items.len);
-            try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
-
-            const output = try Evaluator.evaluate_program(&ast, allocator);
-            const outstr = output.ToString(allocator) catch |err| switch (err) {
-                Evaluator.Error.NonStringifibaleObject => {
-                    try stdout.print("Unable to parse this program yet!\n", .{});
-                    try bw.flush();
-                    continue;
-                },
-                else => |overflow| return overflow,
-            };
-
-            switch (output) {
-                .integer => {
-                    defer allocator.free(outstr);
-                    defer allocator.destroy(output.integer);
-                    try stdout.print("Output >> {s}\n", .{outstr});
-                },
-                .boolean => {
-                    defer allocator.destroy(output.boolean);
-                    try stdout.print("Output >> {s}\n", .{outstr});
-                },
-                inline else => {},
-            }
+            // var outlist = std.ArrayList(u8).init(allocator);
+            // defer outlist.deinit();
+            //
+            // Evaluator.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
+            //     Evaluator.Error.ReferencingNodeZero => {
+            //         std.debug.print(
+            //             "Error parsing AST to string: Encountered an endless loop in AST where the lhs of one of the statements is 0\n",
+            //             .{},
+            //         );
+            //     },
+            //     else => |overflow| return overflow,
+            // };
+            //
+            // outlist.shrinkRetainingCapacity(outlist.items.len);
+            // try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
             // for (0..ast.nodes.len) |i| {
             //     const n = ast.nodes.get(i);
             //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
@@ -100,10 +79,29 @@ pub fn start() !void {
             //     const n = ast.extra_data[i];
             //     try stdout.print("{}, ", .{n});
             // }
+            //
+            // try stdout.print("\n", .{});
+            //
+            // try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            const output = Evaluator.evaluate_program(&ast, allocator) catch |err| switch (err) {
+                Evaluator.Error.IncorrectLiteralType => {
+                    try stdout.print("Illegal operation! an operation recieved the incorrect type!\n", .{});
+                    try bw.flush();
+                    continue;
+                },
+                else => |overflow| return overflow,
+            };
+            defer output.deinit(allocator);
+            const outstr = output.ToString(&buffer) catch |err| switch (err) {
+                object.Error.NonStringifibaleObject => {
+                    try stdout.print("Unable to parse this program yet!\n", .{});
+                    try bw.flush();
+                    continue;
+                },
+                else => |overflow| return overflow,
+            };
 
-            try stdout.print("\n", .{});
-
-            try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            try stdout.print("Output >> {s}\n", .{outstr});
 
             try bw.flush();
         }
@@ -122,3 +120,4 @@ const std = @import("std");
 const lexer = @import("../tessel/lexer.zig");
 const Parser = @import("../tessel/parser.zig");
 const Evaluator = @import("../tessel/evaluator.zig");
+const object = @import("../tessel/object.zig");
