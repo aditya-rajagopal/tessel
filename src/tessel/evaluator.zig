@@ -4,12 +4,25 @@ pub const Error = error{ ReferencingNodeZero, IncorrectLiteralType } || object.E
 
 pub fn evaluate_program(ast: *Ast, allocator: Allocator) Error!Object {
     const root_node = ast.nodes.get(0);
-    const num_statements = root_node.node_data.rhs - root_node.node_data.lhs;
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
 
-    for (0..num_statements) |i| {
-        const obj = try eval_statement(ast, statements[i], allocator);
-        if (i == num_statements - 1) {
+    return evaluate_block(ast, statements, allocator);
+}
+
+pub fn evaluate_block(ast: *Ast, statemnts: []u32, allocator: Allocator) Error!Object {
+    for (statemnts, 0..) |s, i| {
+        // TODO: Deal with the errors by passing error objects.
+        const obj = eval_statement(ast, s, allocator) catch |err| switch (err) {
+            object.Error.InactiveField => escape: {
+                break :escape .null;
+            },
+            Error.IncorrectLiteralType => escape: {
+                break :escape .null;
+            },
+            else => |overflow| return overflow,
+        };
+
+        if (i == statemnts.len - 1) {
             return obj;
         }
         obj.deinit(allocator);
@@ -35,7 +48,7 @@ fn eval_statement(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Ob
     }
 }
 
-fn eval_expression(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
+fn eval_expression(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) Error!Object {
     if (node >= ast.nodes.len) {
         return .null;
     }
@@ -64,7 +77,7 @@ fn eval_expression(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !O
         => {
             const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
             const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
-            return eval_boolean_infix_operation(ast_node.tag, left, right, allocator);
+            return eval_intboolean_infix_operation(ast_node.tag, left, right, allocator);
         },
         .LESS_THAN,
         .GREATER_THAN,
@@ -79,9 +92,12 @@ fn eval_expression(ast: *Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !O
             const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
             return eval_intint_infix_operation(ast_node.tag, left, right, allocator);
         },
+        .NAKED_IF => return eval_naked_if_expression(ast, ast_node, allocator),
+        .IF_ELSE => return eval_ifelse_expression(ast, ast_node, allocator),
         else => return .null,
     }
 }
+
 fn eval_prefix_operation(tag: Ast.Node.Tag, value: Object, allocator: Allocator) Error!Object {
     switch (tag) {
         .BOOL_NOT => {
@@ -96,7 +112,10 @@ fn eval_prefix_operation(tag: Ast.Node.Tag, value: Object, allocator: Allocator)
                     b.value = !b.value;
                     return value;
                 },
-                inline else => return Error.IncorrectLiteralType,
+                inline else => {
+                    defer value.deinit(allocator);
+                    return Error.IncorrectLiteralType;
+                },
             }
         },
         .NEGATION => {
@@ -167,7 +186,52 @@ fn eval_intint_infix_operation(tag: Ast.Node.Tag, left: Object, right: Object, a
     return .null;
 }
 
-fn eval_boolean_infix_operation(tag: Ast.Node.Tag, left: Object, right: Object, allocator: Allocator) Error!Object {
+fn eval_naked_if_expression(ast: *Ast, ast_node: Ast.Node, allocator: Allocator) Error!Object {
+    const condition = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+    defer condition.deinit(allocator);
+
+    const result: bool = switch (condition) {
+        .integer => |i| i.value != 0,
+        .boolean => |b| b.value,
+        else => unreachable,
+    };
+
+    if (result) {
+        const block_node_tag = ast.nodes.items(.tag)[ast_node.node_data.rhs];
+        std.debug.assert(block_node_tag == .BLOCK);
+        const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
+        const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+        return evaluate_block(ast, statements, allocator);
+    }
+    return .null;
+}
+
+fn eval_ifelse_expression(ast: *Ast, ast_node: Ast.Node, allocator: Allocator) Error!Object {
+    const condition = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+    defer condition.deinit(allocator);
+
+    const result: bool = switch (condition) {
+        .integer => |i| i.value != 0,
+        .boolean => |b| b.value,
+        else => unreachable,
+    };
+
+    const blocks = ast.extra_data[ast_node.node_data.rhs .. ast_node.node_data.rhs + 2];
+    var block_node_data: Ast.Node.NodeData = undefined;
+    if (result) {
+        const block_node_tag = ast.nodes.items(.tag)[blocks[0]];
+        std.debug.assert(block_node_tag == .BLOCK);
+        block_node_data = ast.nodes.items(.node_data)[blocks[0]];
+    } else {
+        const block_node_tag = ast.nodes.items(.tag)[blocks[1]];
+        std.debug.assert(block_node_tag == .BLOCK);
+        block_node_data = ast.nodes.items(.node_data)[blocks[1]];
+    }
+    const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+    return evaluate_block(ast, statements, allocator);
+}
+
+fn eval_intboolean_infix_operation(tag: Ast.Node.Tag, left: Object, right: Object, allocator: Allocator) Error!Object {
     defer left.deinit(allocator);
     defer right.deinit(allocator);
     var result: bool = false;
@@ -347,7 +411,7 @@ test "evaluate_booleans" {
         .{ .source = "(1 > 2) == false", .output = "true" },
     };
 
-    try eval_tests(&tests);
+    try eval_tests(&tests, false);
 }
 
 test "evaluate_prefix_not" {
@@ -374,7 +438,7 @@ test "evaluate_prefix_not" {
         },
     };
 
-    try eval_tests(&tests);
+    try eval_tests(&tests, false);
 }
 
 test "evaluate_integer_expressions" {
@@ -396,10 +460,24 @@ test "evaluate_integer_expressions" {
         .{ .source = "(5 + 10 * 2 + 15 / 3) * 2 + -10", .output = "50" },
     };
 
-    try eval_tests(&tests);
+    try eval_tests(&tests, false);
+}
+test "evaluate_if_else_expressions" {
+    const tests = [_]test_struct{
+        .{ .source = "if (true) { 10 }", .output = "10" },
+        .{ .source = "if (false) { 10 }", .output = "null" },
+        .{ .source = "if (1) { 10 }", .output = "10" },
+        .{ .source = "if (1 < 2) { 10 }", .output = "10" },
+        .{ .source = "if (1 > 2) { 10 }", .output = "null" },
+        .{ .source = "if (1 > 2) { 10 } else { 20 }", .output = "20" },
+        .{ .source = "if (1 < 2) { 10 } else { 20 }", .output = "10" },
+        .{ .source = "if (1 < 2) { if ( 3 < 2 ) { 30 } else{ if (1 < 2 * 5 + 3) { 10 } }} else { 20 }", .output = "10" },
+    };
+
+    try eval_tests(&tests, false);
 }
 
-fn eval_tests(tests: []const test_struct) !void {
+fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
     var buffer: [1024]u8 = undefined;
     for (tests) |t| {
         var ast = try Parser.parse_program(t.source, testing.allocator);
@@ -408,6 +486,9 @@ fn eval_tests(tests: []const test_struct) !void {
         const output = try Evaluator.evaluate_program(&ast, testing.allocator);
         defer output.deinit(testing.allocator);
         const outstr = try output.ToString(&buffer);
+        if (enable_debug_print) {
+            std.debug.print("Testing: Source: {s}\n Expected: {s} \t Got: {s}\n", .{ t.source, t.output, outstr });
+        }
         try testing.expectEqualSlices(u8, t.output, outstr);
     }
 }

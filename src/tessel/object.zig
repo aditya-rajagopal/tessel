@@ -114,12 +114,13 @@ pub const Object = union(ObjectTypes) {
 
     pub fn ToString(self: Object, buffer: []u8) ![]const u8 {
         switch (self) {
-            .integer => |i| return std.fmt.bufPrintZ(buffer, "{d}", .{i.value}),
+            .integer => |i| return std.fmt.bufPrint(buffer, "{d}", .{i.value}),
             .boolean => |b| if (b.value) {
                 return std.fmt.bufPrint(buffer, "true", .{});
             } else {
                 return std.fmt.bufPrint(buffer, "false", .{});
             },
+            .null => return std.fmt.bufPrint(buffer, "null", .{}),
             inline else => return Error.NonStringifibaleObject,
         }
     }
