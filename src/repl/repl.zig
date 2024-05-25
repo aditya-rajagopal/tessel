@@ -81,8 +81,9 @@ pub fn start() !void {
             // }
             //
             // try stdout.print("\n", .{});
-            //
-            // try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            // try bw.flush();
+
+            try Parser.print_parser_errors_to_stdout(&ast, stdout);
             const output = Evaluator.evaluate_program(&ast, allocator) catch |err| switch (err) {
                 Evaluator.Error.IncorrectLiteralType => {
                     try stdout.print("Illegal operation! an operation recieved the incorrect type!\n", .{});

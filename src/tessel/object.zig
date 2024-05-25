@@ -19,7 +19,7 @@ pub const ObjectStructures = struct {
     };
 
     pub const ReturnType = struct {
-        value: ReturnTypeUnion,
+        value: Object,
     };
 
     pub const FunctionExpressionType = struct {
@@ -35,12 +35,16 @@ pub const ObjectStructures = struct {
         parameters: Ast.Node.ExtraDataRange,
     };
 
-    pub const ReturnTypeUnion = union(enum) {
-        int: i64,
-        bool: bool,
-        err: RuntimeErrorType,
-        func: FunctionExpressionType,
+    pub const StringStorage = struct {
+        string: []const u8,
     };
+
+    // pub const ReturnTypeUnion = union(enum) {
+    //     int: i64,
+    //     bool: bool,
+    //     err: RuntimeErrorType,
+    //     func: FunctionExpressionType,
+    // };
 };
 
 pub const Object = union(ObjectTypes) {
@@ -65,6 +69,28 @@ pub const Object = union(ObjectTypes) {
         }
     }
 
+    pub fn getEnumTagAsString(self: Object) []const u8 {
+        return switch (self) {
+            .integer => "INTEGER",
+            .boolean => "BOOLEAN",
+            .return_expression => "RETURN EXPRESSION",
+            .function_expression => "FUNCTION EXPRESSION",
+            .runtime_error => "RUNTIME ERROR",
+            .null => "NULL",
+        };
+    }
+
+    pub fn getEnumTag(self: Object) ObjectTypes {
+        return switch (self) {
+            .integer => .integer,
+            .boolean => .boolean,
+            .return_expression => .return_expression,
+            .function_expression => .function_expression,
+            .runtime_error => .runtime_error,
+            .null => .null,
+        };
+    }
+
     pub fn Create(tag: ObjectTypes, allocator: Allocator, data: *const anyopaque) Error!Object {
         switch (tag) {
             .integer => {
@@ -81,7 +107,7 @@ pub const Object = union(ObjectTypes) {
             },
             .return_expression => {
                 const obj = try allocator.create(ObjectStructures.ReturnType);
-                const value: *const ObjectStructures.ReturnTypeUnion = @ptrCast(@alignCast(data));
+                const value: *const Object = @ptrCast(@alignCast(data));
                 obj.value = value.*;
                 return Object{ .return_expression = obj };
             },
@@ -92,7 +118,9 @@ pub const Object = union(ObjectTypes) {
                 return Object{ .function_expression = obj };
             },
             .runtime_error => {
+                const value: *const ObjectStructures.StringStorage = @ptrCast(@alignCast(data));
                 const obj = try allocator.create(ObjectStructures.RuntimeErrorType);
+                obj.value = value.string;
                 return Object{ .runtime_error = obj };
             },
             .null => {
@@ -107,7 +135,10 @@ pub const Object = union(ObjectTypes) {
             .boolean => |b| allocator.destroy(b),
             .return_expression => |r| allocator.destroy(r),
             .function_expression => |f| allocator.destroy(f),
-            .runtime_error => |r| allocator.destroy(r),
+            .runtime_error => |r| {
+                allocator.free(r.value);
+                allocator.destroy(r);
+            },
             .null => return,
         }
     }
@@ -120,6 +151,7 @@ pub const Object = union(ObjectTypes) {
             } else {
                 return std.fmt.bufPrint(buffer, "false", .{});
             },
+            .runtime_error => |e| return e.value,
             .null => return std.fmt.bufPrint(buffer, "null", .{}),
             inline else => return Error.NonStringifibaleObject,
         }
@@ -210,31 +242,24 @@ test "evaluator_object_test" {
     try testing.expectEqualDeep(function_parameters, func_obj.function_expression.value.parameters);
     try testing.expectEqualDeep(function_block, func_obj.function_expression.value.block_statements);
 
-    const return_data = ObjectStructures.ReturnTypeUnion{ .func = func_obj.function_expression.* };
-    const return_obj = try Object.Create(.return_expression, testing.allocator, @ptrCast(&return_data));
+    // const return_data = ObjectStructures.ReturnTypeUnion{ .func = func_obj.function_expression.* };
+    const return_obj = try Object.Create(.return_expression, testing.allocator, @ptrCast(&func_obj));
     defer return_obj.deinit(testing.allocator);
 
     try testing.expectEqualDeep(
         Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        return_obj.return_expression.value.func.value.parameters,
+        return_obj.return_expression.value.function_expression.value.parameters,
     );
     try testing.expectEqualDeep(
         Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        return_obj.return_expression.value.func.value.block_statements,
+        return_obj.return_expression.value.function_expression.value.block_statements,
     );
 
-    var err_msg: []const u8 = undefined;
-    var err_obj = try Object.Create(.runtime_error, testing.allocator, "");
-    err_obj.runtime_error.value = "This is an error";
+    const err_msg = try std.fmt.allocPrint(testing.allocator, "This is an error: {d}", .{42});
+    var err_obj = try Object.Create(.runtime_error, testing.allocator, @ptrCast(&err_msg));
     defer err_obj.deinit(testing.allocator);
 
-    switch (err_obj) {
-        .runtime_error => |e| {
-            err_msg = e.value;
-        },
-        inline else => unreachable,
-    }
-    try testing.expectEqualSlices(u8, err_msg, err_obj.runtime_error.value);
+    try testing.expectEqualSlices(u8, "This is an error: 42", err_obj.runtime_error.value);
 
     const null_obj: Object = .null;
     defer null_obj.deinit(testing.allocator);
