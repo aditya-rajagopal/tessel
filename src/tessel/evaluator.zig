@@ -2,17 +2,19 @@ pub const Evaluator = @This();
 
 pub const Error = error{ReferencingNodeZero} || object.Error;
 
-pub fn evaluate_program(ast: *const Ast, allocator: Allocator) Error!Object {
+pub fn evaluate_program(ast: *const Ast, allocator: Allocator, env: *Environment) Error!Object {
     const root_node = ast.nodes.get(0);
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
 
-    return evaluate_program_statements(ast, statements, allocator);
+    // std.debug.print("Env#evaluate_program: contains a: {any}\n", .{env.memory.contains("a")});
+    return evaluate_program_statements(ast, statements, allocator, env);
 }
 
-fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: Allocator) Error!Object {
+fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
+    // std.debug.print("Env#evaluate_statements: contains a: {any}\n", .{env.memory.contains("a")});
     for (statemnts, 0..) |s, i| {
         // TODO: Deal with the errors by passing error objects.
-        const obj = eval_statement(ast, s, allocator) catch |err| switch (err) {
+        const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
             object.Error.InactiveField => escape: {
                 break :escape .null;
             },
@@ -38,10 +40,10 @@ fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: All
     return .null;
 }
 
-fn evaluate_block(ast: *const Ast, statemnts: []u32, allocator: Allocator) Error!Object {
+fn evaluate_block(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
     for (statemnts, 0..) |s, i| {
         // TODO: Deal with the errors by passing error objects.
-        const obj = eval_statement(ast, s, allocator) catch |err| switch (err) {
+        const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
             object.Error.InactiveField => escape: {
                 break :escape .null;
             },
@@ -63,7 +65,7 @@ fn evaluate_block(ast: *const Ast, statemnts: []u32, allocator: Allocator) Error
     return .null;
 }
 
-fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator) !Object {
+fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator, env: *Environment) !Object {
     if (node >= ast.nodes.len) {
         return .null;
     }
@@ -72,21 +74,77 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
         return Error.ReferencingNodeZero;
     }
 
+    // std.debug.print("Env#evaluate_statement: contains a: {any}\n", .{env.memory.contains("a")});
     const ast_node = ast.nodes.get(node);
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
-            return eval_expression(ast, ast_node.node_data.lhs, allocator);
+            // std.debug.print("Env#evaluate_statement:EXPRESSION: contains a: {any}\n", .{env.memory.contains("a")});
+            return eval_expression(ast, ast_node.node_data.lhs, allocator, env);
         },
         .RETURN_STATEMENT => {
-            const value = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const value = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
             const obj = Object.Create(.return_expression, allocator, @ptrCast(&value));
             return obj;
+        },
+        .VAR_STATEMENT => {
+            const value = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            defer value.deinit(allocator);
+            if (value.getEnumTag() == .runtime_error) {
+                return value;
+            }
+            const var_tag = get_token_literal(ast, ast_node.main_token);
+            var tag: Environment.StorageType.Tag = .constant;
+            if (std.mem.eql(u8, var_tag, "var")) {
+                tag = .variable;
+            }
+            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
+            _ = env.create_variable(allocator, get_token_literal(ast, ident_token), value, tag) catch |err| switch (err) {
+                Environment.Error.VariableAlreadyInitialised => {
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Identifier \"{s}\" has already been initialised",
+                        .{get_token_literal(ast, ident_token)},
+                    );
+                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                },
+                Environment.Error.NonExistantVariable => unreachable,
+                Environment.Error.ConstVariableModification => unreachable,
+                else => |overflow| return overflow,
+            };
+            return .null;
+        },
+        .ASSIGNMENT_STATEMENT => {
+            const value = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            defer value.deinit(allocator);
+            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
+            env.update_variable(allocator, get_token_literal(ast, ident_token), value) catch |err| switch (err) {
+                Environment.Error.NonExistantVariable => {
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Identifier \"{s}\" does not exist. Cannot assign anything to it.",
+                        .{get_token_literal(ast, ident_token)},
+                    );
+                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                },
+                Environment.Error.ConstVariableModification => {
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Identifier \"{s}\" is declared as a constant and cannot be modified",
+                        .{get_token_literal(ast, ident_token)},
+                    );
+                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                },
+                Environment.Error.VariableAlreadyInitialised => unreachable,
+                else => |overflow| return overflow,
+            };
+
+            return .null;
         },
         else => return .null,
     }
 }
 
-fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator) Error!Object {
+fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator, env: *Environment) Error!Object {
     if (node >= ast.nodes.len) {
         return .null;
     }
@@ -95,6 +153,7 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
         return Error.ReferencingNodeZero;
     }
 
+    // std.debug.print("Env#eval_expression: contains a: {any}\n", .{env.memory.contains("a")});
     const ast_node = ast.nodes.get(node);
     var obj: Object = undefined;
     switch (ast_node.tag) {
@@ -106,20 +165,30 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
             obj = try Object.Create(.boolean, allocator, @ptrCast(&value));
         },
         .IDENTIFIER => {
-            const output = try std.fmt.allocPrint(allocator, "Identifier not found: {s}", .{get_token_literal(ast, ast_node.main_token)});
-            obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
+            const ident_name = get_token_literal(ast, ast_node.main_token);
+            const value = try env.get_object(ident_name, allocator);
+            if (value.getEnumTag() == .null) {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Identifier not found: {s}",
+                    .{ident_name},
+                );
+                obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
+            } else {
+                return value;
+            }
         },
         .NEGATION, .BOOL_NOT => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
             if (left.getEnumTag() == .runtime_error) return left;
             obj = try eval_prefix_operation(ast_node.tag, left, allocator);
         },
         .DOUBLE_EQUAL,
         .NOT_EQUAL,
         => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
             if (left.getEnumTag() == .runtime_error) return left;
-            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
+            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
             if (right.getEnumTag() == .runtime_error) {
                 defer left.deinit(allocator);
                 return right;
@@ -135,9 +204,9 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
         .MULTIPLY,
         .DIVIDE,
         => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
             if (left.getEnumTag() == .runtime_error) return left;
-            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
+            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
             if (right.getEnumTag() == .runtime_error) {
                 defer left.deinit(allocator);
                 return right;
@@ -146,10 +215,10 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
             obj = try eval_intint_infix_operation(ast, &ast_node, left, right, allocator);
         },
         .NAKED_IF => {
-            obj = try eval_if_expression(ast, ast_node, allocator);
+            obj = try eval_if_expression(ast, ast_node, allocator, env);
         },
         .IF_ELSE => {
-            obj = try eval_if_expression(ast, ast_node, allocator);
+            obj = try eval_if_expression(ast, ast_node, allocator, env);
         },
         else => {
             return .null;
@@ -279,8 +348,8 @@ fn eval_intint_infix_operation(ast: *const Ast, node: *const Ast.Node, left: Obj
     return .null;
 }
 
-fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator) Error!Object {
-    const condition = try eval_expression(ast, ast_node.node_data.lhs, allocator);
+fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator, env: *Environment) Error!Object {
+    const condition = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
 
     var result: bool = false;
     switch (condition) {
@@ -298,7 +367,7 @@ fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator)
                 std.debug.assert(block_node_tag == .BLOCK);
                 const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
                 const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-                return evaluate_block(ast, statements, allocator);
+                return evaluate_block(ast, statements, allocator, env);
             } else {
                 return .null;
             }
@@ -316,7 +385,7 @@ fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator)
                 block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             }
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            return evaluate_block(ast, statements, allocator);
+            return evaluate_block(ast, statements, allocator, env);
         },
         inline else => return .null,
     }
@@ -618,6 +687,25 @@ test "evaluate_return_statements" {
     try eval_tests(&tests, false);
 }
 
+test "evaluate_identifiers" {
+    const tests = [_]test_struct{
+        .{ .source = "const a = 10; a;", .output = "10" },
+        .{ .source = "const a = 10; const b = 10; a;", .output = "10" },
+        .{ .source = "const a = 10; const b = 11; a; b;", .output = "11" },
+        .{ .source = "const a = 10; const b = 11; const c = a * b; b + c;", .output = "121" },
+        .{ .source = "const a = 2 * 2; const b = a + 3; if ( a < b ) { a; } else { b; } ", .output = "4" },
+        .{
+            .source = "const a = 2 * 2; const b = a + 3; const c = if ( a < b ) { a + 3; } else { b; }; c; ",
+            .output = "7",
+        },
+        .{
+            .source = "var a = 2 * 2; const b = a + 3; if ( a < b ) { a = 5; } else { a = 2; }; a; ",
+            .output = "5",
+        },
+    };
+
+    try eval_tests(&tests, false);
+}
 test "evaluate_errors" {
     const tests = [_]test_struct{
         .{ .source = "5 + true", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
@@ -630,7 +718,11 @@ test "evaluate_errors" {
         .{ .source = "-true", .output = "Unknown Operation: -<BOOLEAN>" },
         .{ .source = "if ( 1 < 10 ) { return false + 5; }", .output = "Type mismatch: <BOOLEAN> + <INTEGER>" },
         .{ .source = "if ( 1 + true < 10 ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "if ( 10 > 1 + true ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
         .{ .source = "5 + 5; 5 + true; if ( 1 < 10 ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "const a = 10; a = 11;", .output = "Identifier \"a\" is declared as a constant and cannot be modified" },
+        .{ .source = "const a = 10; b = 11;", .output = "Identifier \"b\" does not exist. Cannot assign anything to it." },
+        .{ .source = "const a = 10; const a = 11;", .output = "Identifier \"a\" has already been initialised" },
     };
 
     try eval_tests(&tests, false);
@@ -639,16 +731,18 @@ test "evaluate_errors" {
 fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
     var buffer: [1024]u8 = undefined;
     for (tests) |t| {
+        var env = try Environment.Create(testing.allocator);
         var ast = try Parser.parse_program(t.source, testing.allocator);
         defer ast.deinit(testing.allocator);
 
-        const output = try Evaluator.evaluate_program(&ast, testing.allocator);
+        const output = try Evaluator.evaluate_program(&ast, testing.allocator, env);
         defer output.deinit(testing.allocator);
         const outstr = try output.ToString(&buffer);
         if (enable_debug_print) {
             std.debug.print("Testing: Source: {s}\n Expected: {s} \t Got: {s}\n", .{ t.source, t.output, outstr });
         }
         try testing.expectEqualSlices(u8, t.output, outstr);
+        env.deinit(testing.allocator);
     }
 }
 
@@ -656,6 +750,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const token = @import("token.zig");
+const Environment = @import("environment.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
 const object = @import("object.zig");

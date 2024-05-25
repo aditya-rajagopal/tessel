@@ -91,6 +91,39 @@ pub const Object = union(ObjectTypes) {
         };
     }
 
+    pub fn copy(self: Object, allocator: Allocator) Allocator.Error!Object {
+        switch (self) {
+            .integer => |i| {
+                const obj = try allocator.create(ObjectStructures.IntegerType);
+                obj.value = i.value;
+                return Object{ .integer = obj };
+            },
+            .boolean => |b| {
+                const obj = try allocator.create(ObjectStructures.BooleanType);
+                obj.value = b.value;
+                return Object{ .boolean = obj };
+            },
+            .return_expression => |r| {
+                const obj = try allocator.create(ObjectStructures.ReturnType);
+                obj.value = r.value;
+                return Object{ .return_expression = obj };
+            },
+            .function_expression => |f| {
+                const obj = try allocator.create(ObjectStructures.FunctionExpressionType);
+                obj.value = f.value;
+                return Object{ .function_expression = obj };
+            },
+            .runtime_error => |err| {
+                const obj = try allocator.create(ObjectStructures.RuntimeErrorType);
+                obj.value = err.value;
+                return Object{ .runtime_error = obj };
+            },
+            .null => {
+                return .null;
+            },
+        }
+    }
+
     pub fn Create(tag: ObjectTypes, allocator: Allocator, data: *const anyopaque) Error!Object {
         switch (tag) {
             .integer => {

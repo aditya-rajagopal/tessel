@@ -29,6 +29,7 @@ pub fn start() !void {
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
+    var env = try Environment.Create(allocator);
 
     while (true) {
         try stdout.print("{s}", .{PROMT});
@@ -84,7 +85,7 @@ pub fn start() !void {
             // try bw.flush();
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
-            const output = try Evaluator.evaluate_program(&ast, allocator);
+            const output = try Evaluator.evaluate_program(&ast, allocator, env);
             defer output.deinit(allocator);
             const outstr = output.ToString(&buffer) catch |err| switch (err) {
                 object.Error.NonStringifibaleObject => {
@@ -95,11 +96,15 @@ pub fn start() !void {
                 else => |overflow| return overflow,
             };
 
-            try stdout.print("Output >> {s}\n", .{outstr});
-
+            switch (output) {
+                .null => {},
+                else => try stdout.print("Output >> {s}\n", .{outstr}),
+            }
             try bw.flush();
         }
     }
+
+    env.deinit(allocator);
 }
 
 fn print_header(stdout: anytype) !void {
@@ -115,3 +120,4 @@ const lexer = @import("../tessel/lexer.zig");
 const Parser = @import("../tessel/parser.zig");
 const Evaluator = @import("../tessel/evaluator.zig");
 const object = @import("../tessel/object.zig");
+const Environment = @import("../tessel/environment.zig");
