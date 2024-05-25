@@ -105,6 +105,10 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
             const value = ast_node.node_data.lhs == 1;
             obj = try Object.Create(.boolean, allocator, @ptrCast(&value));
         },
+        .IDENTIFIER => {
+            const output = try std.fmt.allocPrint(allocator, "Identifier not found: {s}", .{get_token_literal(ast, ast_node.main_token)});
+            obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
+        },
         .NEGATION, .BOOL_NOT => {
             const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
             if (left.getEnumTag() == .runtime_error) return left;
@@ -116,7 +120,10 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
             const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
             if (left.getEnumTag() == .runtime_error) return left;
             const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
-            if (right.getEnumTag() == .runtime_error) return left;
+            if (right.getEnumTag() == .runtime_error) {
+                defer left.deinit(allocator);
+                return right;
+            }
             obj = try eval_intboolean_infix_operation(ast, &ast_node, left, right, allocator);
         },
         .LESS_THAN,
@@ -131,7 +138,11 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
             const left = try eval_expression(ast, ast_node.node_data.lhs, allocator);
             if (left.getEnumTag() == .runtime_error) return left;
             const right = try eval_expression(ast, ast_node.node_data.rhs, allocator);
-            if (right.getEnumTag() == .runtime_error) return left;
+            if (right.getEnumTag() == .runtime_error) {
+                defer left.deinit(allocator);
+                return right;
+            }
+
             obj = try eval_intint_infix_operation(ast, &ast_node, left, right, allocator);
         },
         .NAKED_IF => {
@@ -610,6 +621,11 @@ test "evaluate_return_statements" {
 test "evaluate_errors" {
     const tests = [_]test_struct{
         .{ .source = "5 + true", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "foobar", .output = "Identifier not found: foobar" },
+        .{ .source = "foobar * 10", .output = "Identifier not found: foobar" },
+        .{ .source = "5; fizzbuzz * 10", .output = "Identifier not found: fizzbuzz" },
+        .{ .source = "if ( 1 + 2 < a ) { return false + 5; }", .output = "Identifier not found: a" },
+        .{ .source = "if ( 1 + 2 < 10 ) { 10; c; return b + 5; }", .output = "Identifier not found: c" },
         .{ .source = "true - true", .output = "Unknown Operation: <BOOLEAN> - <BOOLEAN>" },
         .{ .source = "-true", .output = "Unknown Operation: -<BOOLEAN>" },
         .{ .source = "if ( 1 < 10 ) { return false + 5; }", .output = "Type mismatch: <BOOLEAN> + <INTEGER>" },
