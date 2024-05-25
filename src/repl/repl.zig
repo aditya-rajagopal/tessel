@@ -84,14 +84,7 @@ pub fn start() !void {
             // try bw.flush();
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
-            const output = Evaluator.evaluate_program(&ast, allocator) catch |err| switch (err) {
-                Evaluator.Error.IncorrectLiteralType => {
-                    try stdout.print("Illegal operation! an operation recieved the incorrect type!\n", .{});
-                    try bw.flush();
-                    continue;
-                },
-                else => |overflow| return overflow,
-            };
+            const output = try Evaluator.evaluate_program(&ast, allocator);
             defer output.deinit(allocator);
             const outstr = output.ToString(&buffer) catch |err| switch (err) {
                 object.Error.NonStringifibaleObject => {
