@@ -115,6 +115,7 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
                 },
                 Environment.Error.NonExistantVariable => unreachable,
                 Environment.Error.ConstVariableModification => unreachable,
+                Environment.Error.ExceedingMaxDepth => unreachable,
                 else => |overflow| return overflow,
             };
             return .null;
@@ -151,6 +152,7 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
                     return Object.Create(.runtime_error, allocator, @ptrCast(&output));
                 },
                 Environment.Error.VariableAlreadyInitialised => unreachable,
+                Environment.Error.ExceedingMaxDepth => unreachable,
                 else => |overflow| return overflow,
             };
 
@@ -299,7 +301,20 @@ fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator:
         return Object.Create(.runtime_error, allocator, @ptrCast(&output));
     }
 
-    const function_body_env = try get_function_body_env(ast, function_expression, args, allocator) orelse {
+    const function_body_env = get_function_body_env(ast, function_expression, args, allocator) catch |err| switch (err) {
+        Environment.Error.ExceedingMaxDepth => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Exceeded depth of {d} in function calls.",
+                .{Environment.MaxEnvDepth},
+            );
+            return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+        },
+        Environment.Error.ConstVariableModification => unreachable,
+        Environment.Error.NonExistantVariable => unreachable,
+        Environment.Error.VariableAlreadyInitialised => unreachable,
+        else => |overflow| return overflow,
+    } orelse {
         const output = try std.fmt.allocPrint(
             allocator,
             "Function has parameters with duplicate names. Cannot call this function",
@@ -312,7 +327,12 @@ fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator:
     for (0..args.len) |i| {
         defer args[i].deinit(allocator);
     }
-    const out = try evaluate_block(ast, function_expression.value.block_statements, allocator, function_body_env);
+    const out = try evaluate_block(
+        ast,
+        function_expression.value.block_statements,
+        allocator,
+        function_body_env,
+    );
     switch (out) {
         .return_expression => {
             defer out.deinit(allocator);
@@ -343,7 +363,7 @@ fn get_function_body_env(
     func: *ObjectStructures.FunctionExpressionType,
     args: []const Object,
     allocator: Allocator,
-) Error!?*Environment {
+) !?*Environment {
     const env = try Environment.CreateEnclosed(allocator, func.value.env);
     if (func.value.parameters.len == 0) {
         return env;

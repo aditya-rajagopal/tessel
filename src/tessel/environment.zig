@@ -5,7 +5,14 @@ parent_env: ?*Environment,
 child_envs: std.ArrayListUnmanaged(*Environment),
 depth: u32 = 0,
 
-pub const Error = error{ VariableAlreadyInitialised, NonExistantVariable, ConstVariableModification } || Allocator.Error;
+pub const Error = error{
+    VariableAlreadyInitialised,
+    NonExistantVariable,
+    ConstVariableModification,
+    ExceedingMaxDepth,
+} || Allocator.Error;
+
+pub const MaxEnvDepth = 500;
 
 pub fn Create(allocator: Allocator) !*Environment {
     const env = try allocator.create(Environment);
@@ -17,10 +24,14 @@ pub fn Create(allocator: Allocator) !*Environment {
 }
 
 pub fn CreateEnclosed(allocator: Allocator, parent: *Environment) !*Environment {
+    if (parent.depth == MaxEnvDepth) {
+        return Error.ConstVariableModification;
+    }
     const env = try allocator.create(Environment);
     env.memory = .{};
     env.parent_env = parent;
     env.child_envs = .{};
+    env.depth = parent.depth + 1;
     return env;
 }
 
