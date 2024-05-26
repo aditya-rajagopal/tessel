@@ -109,13 +109,6 @@ pub fn begin_parsing(self: *Parser) !void {
     const scratch_top = self.scratch_pad.items.len;
     defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
     while (true) {
-        // Lexer.print_token(self.source_buffer, .{
-        //     .type = self.token_tags[self.token_current], //
-        //     .loc = .{
-        //         .start = self.token_starts[self.token_current], //
-        //         .end = self.token_ends[self.token_current],
-        //     },
-        // }, "Parser#begin_parsing ");
         const node = try self.parse_statement();
         if (node != null_node) {
             try self.scratch_pad.append(self.allocator, node);

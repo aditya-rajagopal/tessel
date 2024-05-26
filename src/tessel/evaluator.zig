@@ -12,8 +12,13 @@ pub fn evaluate_program(ast: *const Ast, allocator: Allocator, env: *Environment
 fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
     for (statemnts, 0..) |s, i| {
         const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
-            object.Error.InactiveField => escape: {
-                break :escape .null;
+            object.Error.InactiveField => {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Something has gone terribly wrong. Refer to the GLWTS licence.",
+                    .{},
+                );
+                return Object.Create(.runtime_error, allocator, @ptrCast(&output));
             },
             else => |overflow| return overflow,
         };
@@ -40,8 +45,13 @@ fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: All
 fn evaluate_block(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
     for (statemnts, 0..) |s, i| {
         const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
-            object.Error.InactiveField => escape: {
-                break :escape .null;
+            object.Error.InactiveField => {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Something has gone terribly wrong. Refer to the GLWTS licence.",
+                    .{},
+                );
+                return Object.Create(.runtime_error, allocator, @ptrCast(&output));
             },
             else => |overflow| return overflow,
         };
@@ -70,11 +80,9 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
         return Error.ReferencingNodeZero;
     }
 
-    // std.debug.print("Env#evaluate_statement: contains a: {any}\n", .{env.memory.contains("a")});
     const ast_node = ast.nodes.get(node);
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
-            // std.debug.print("Env#evaluate_statement:EXPRESSION: contains a: {any}\n", .{env.memory.contains("a")});
             return eval_expression(ast, ast_node.node_data.lhs, allocator, env);
         },
         .RETURN_STATEMENT => {
@@ -249,13 +257,6 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
         },
     }
 
-    // switch (obj) {
-    //     .return_expression => {
-    //         defer obj.deinit(allocator);
-    //         return obj.return_expression.value;
-    //     },
-    //     else => return obj,
-    // }
     return obj;
 }
 
@@ -322,11 +323,12 @@ fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator:
         );
         return Object.Create(.runtime_error, allocator, @ptrCast(&output));
     };
-    // defer function_body_env.deinit(allocator);
+
     defer allocator.free(args);
     for (0..args.len) |i| {
         defer args[i].deinit(allocator);
     }
+
     const out = try evaluate_block(
         ast,
         function_expression.value.block_statements,
