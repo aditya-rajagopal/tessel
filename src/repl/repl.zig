@@ -7,7 +7,7 @@ const EXIT = "exit()";
 // const CLEAR = "clear()";
 
 /// Function that starts the REPL. It creates a stdout/in reader/writer and connects the the lexer
-pub fn start() !void {
+pub fn start(allocator: Allocator) !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
@@ -18,14 +18,14 @@ pub fn start() !void {
 
     try print_header(stdout);
     try bw.flush();
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer {
-        const deinit_status = gpa.deinit();
-        if (deinit_status == .leak) {
-            @panic("memory leak");
-        }
-    }
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // defer {
+    //     const deinit_status = gpa.deinit();
+    //     if (deinit_status == .leak) {
+    //         @panic("memory leak");
+    //     }
+    // }
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
@@ -116,6 +116,7 @@ fn print_header(stdout: anytype) !void {
 }
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const lexer = @import("../tessel/lexer.zig");
 const Parser = @import("../tessel/parser.zig");
 const Evaluator = @import("../tessel/evaluator.zig");

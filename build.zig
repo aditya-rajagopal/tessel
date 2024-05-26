@@ -44,4 +44,32 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
 
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    // benchmark
+
+    const bench = b.addExecutable(.{
+        .name = "tessel_benchmark",
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const loc = b.addInstallArtifact(exe, .{
+        .dest_dir = .{
+            .override = .{ .custom = "./" },
+        },
+        .pdb_dir = .{
+            .override = .{ .custom = "./bin" },
+        },
+    });
+    b.default_step.dependOn(&loc.step);
+
+    const benchmark_command = b.addRunArtifact(bench);
+
+    benchmark_command.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        benchmark_command.addArgs(args);
+    }
+    const bench_step = b.step("benchmark", "Run fibonacci(35) benchmark the app");
+    bench_step.dependOn(&benchmark_command.step);
 }
