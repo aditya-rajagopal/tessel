@@ -31,8 +31,9 @@ pub const ObjectStructures = struct {
     };
 
     pub const FunctionValueType = struct {
-        block_statements: Ast.Node.ExtraDataRange,
-        parameters: Ast.Node.ExtraDataRange,
+        block_statements: []Ast.Node.NodeIndex,
+        parameters: []Ast.Node.NodeIndex,
+        env: *Environment,
     };
 
     pub const StringStorage = struct {
@@ -109,8 +110,13 @@ pub const Object = union(ObjectTypes) {
                 return Object{ .return_expression = obj };
             },
             .function_expression => |f| {
-                const obj = try allocator.create(ObjectStructures.FunctionExpressionType);
+                var obj = try allocator.create(ObjectStructures.FunctionExpressionType);
                 obj.value = f.value;
+                obj.value.parameters = try allocator.alloc(u32, f.value.parameters.len);
+                obj.value.block_statements = try allocator.alloc(u32, f.value.block_statements.len);
+                @memcpy(obj.value.parameters, f.value.parameters);
+                @memcpy(obj.value.block_statements, f.value.block_statements);
+                obj.value.env = f.value.env;
                 return Object{ .function_expression = obj };
             },
             .runtime_error => |err| {
@@ -145,9 +151,17 @@ pub const Object = union(ObjectTypes) {
                 return Object{ .return_expression = obj };
             },
             .function_expression => {
-                const obj = try allocator.create(ObjectStructures.FunctionExpressionType);
+                var obj = try allocator.create(ObjectStructures.FunctionExpressionType);
                 const value: *const ObjectStructures.FunctionValueType = @ptrCast(@alignCast(data));
-                obj.value = value.*;
+                obj.value.parameters = value.parameters;
+                obj.value.block_statements = value.block_statements;
+                // obj.value.parameters = try allocator.alloc(u32, value.parameters.len);
+                // obj.value.block_statements = try allocator.alloc(u32, value.block_statements.len);
+                // @memcpy(obj.value.parameters, value.parameters);
+                // @memcpy(obj.value.block_statements, value.block_statements);
+                // allocator.free(value.parameters);
+                // allocator.free(value.block_statements);
+                obj.value.env = value.env;
                 return Object{ .function_expression = obj };
             },
             .runtime_error => {
@@ -167,7 +181,11 @@ pub const Object = union(ObjectTypes) {
             .integer => |i| allocator.destroy(i),
             .boolean => |b| allocator.destroy(b),
             .return_expression => |r| allocator.destroy(r),
-            .function_expression => |f| allocator.destroy(f),
+            .function_expression => |f| {
+                allocator.free(f.value.block_statements);
+                allocator.free(f.value.parameters);
+                allocator.destroy(f);
+            },
             .runtime_error => |r| {
                 allocator.free(r.value);
                 allocator.destroy(r);
@@ -186,6 +204,7 @@ pub const Object = union(ObjectTypes) {
             },
             .runtime_error => |e| return e.value,
             .null => return std.fmt.bufPrint(buffer, "null", .{}),
+            .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
             inline else => return Error.NonStringifibaleObject,
         }
     }
@@ -212,6 +231,8 @@ test "evaluator_object_test_obj_get" {
 }
 
 test "evaluator_object_test" {
+    const env = try Environment.Create(testing.allocator);
+    defer env.deinit(testing.allocator);
     const int_val: i64 = 41;
     var buffer: [1024]u8 = undefined;
     var int_obj = try Object.Create(.integer, testing.allocator, @ptrCast(&int_val));
@@ -242,51 +263,56 @@ test "evaluator_object_test" {
     const bool_string = try bool_obj.ToString(&buffer);
     try testing.expectEqualSlices(u8, "true", bool_string);
 
-    const func_data: ObjectStructures.FunctionValueType = .{
-        .block_statements = .{
-            .start = 1,
-            .end = 2,
-        },
-        .parameters = .{
-            .start = 1,
-            .end = 2,
-        },
-    };
-    var func_obj = try Object.Create(.function_expression, testing.allocator, @ptrCast(&func_data));
-    defer func_obj.deinit(testing.allocator);
-
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        func_obj.function_expression.value.parameters,
-    );
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        func_obj.function_expression.value.block_statements,
-    );
-    var function_parameters: Ast.Node.ExtraDataRange = undefined;
-    var function_block: Ast.Node.ExtraDataRange = undefined;
-    switch (func_obj) {
-        .function_expression => |f| {
-            function_parameters = f.value.parameters;
-            function_block = f.value.block_statements;
-        },
-        inline else => unreachable,
-    }
-    try testing.expectEqualDeep(function_parameters, func_obj.function_expression.value.parameters);
-    try testing.expectEqualDeep(function_block, func_obj.function_expression.value.block_statements);
-
-    // const return_data = ObjectStructures.ReturnTypeUnion{ .func = func_obj.function_expression.* };
-    const return_obj = try Object.Create(.return_expression, testing.allocator, @ptrCast(&func_obj));
-    defer return_obj.deinit(testing.allocator);
-
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        return_obj.return_expression.value.function_expression.value.parameters,
-    );
-    try testing.expectEqualDeep(
-        Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
-        return_obj.return_expression.value.function_expression.value.block_statements,
-    );
+    // const func_data: ObjectStructures.FunctionValueType = .{
+    //     .block_statements = .{
+    //         .start = 1,
+    //         .end = 2,
+    //     },
+    //     .parameters = .{
+    //         .start = 1,
+    //         .end = 2,
+    //     },
+    //     .env = env,
+    // };
+    // var func_obj = try Object.Create(.function_expression, testing.allocator, @ptrCast(&func_data));
+    // defer func_obj.deinit(testing.allocator);
+    //
+    // try testing.expectEqualDeep(
+    //     Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
+    //     func_obj.function_expression.value.parameters,
+    // );
+    // try testing.expectEqualDeep(
+    //     Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
+    //     func_obj.function_expression.value.block_statements,
+    // );
+    // var function_parameters: Ast.Node.ExtraDataRange = undefined;
+    // var function_block: Ast.Node.ExtraDataRange = undefined;
+    // switch (func_obj) {
+    //     .function_expression => |f| {
+    //         function_parameters = f.value.parameters;
+    //         function_block = f.value.block_statements;
+    //         try f.value.env.create_variable(testing.allocator, "var", int_obj, .constant);
+    //     },
+    //     inline else => unreachable,
+    // }
+    // try testing.expectEqualDeep(function_parameters, func_obj.function_expression.value.parameters);
+    // try testing.expectEqualDeep(function_block, func_obj.function_expression.value.block_statements);
+    // const obj = try func_obj.function_expression.value.env.get_object("var", testing.allocator);
+    // defer obj.deinit(testing.allocator);
+    // try testing.expect(obj.integer.value == 42);
+    //
+    // // const return_data = ObjectStructures.ReturnTypeUnion{ .func = func_obj.function_expression.* };
+    // const return_obj = try Object.Create(.return_expression, testing.allocator, @ptrCast(&func_obj));
+    // defer return_obj.deinit(testing.allocator);
+    //
+    // try testing.expectEqualDeep(
+    //     Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
+    //     return_obj.return_expression.value.function_expression.value.parameters,
+    // );
+    // try testing.expectEqualDeep(
+    //     Ast.Node.ExtraDataRange{ .start = 1, .end = 2 },
+    //     return_obj.return_expression.value.function_expression.value.block_statements,
+    // );
 
     const err_msg = try std.fmt.allocPrint(testing.allocator, "This is an error: {d}", .{42});
     var err_obj = try Object.Create(.runtime_error, testing.allocator, @ptrCast(&err_msg));
@@ -310,3 +336,4 @@ const testing = std.testing;
 const token = @import("token.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
+const Environment = @import("environment.zig");

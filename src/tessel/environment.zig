@@ -1,13 +1,31 @@
 pub const Environment = @This();
 
 memory: std.StringHashMapUnmanaged(StorageType),
+parent_env: ?*Environment,
+child_envs: std.ArrayListUnmanaged(*Environment),
+depth: u32 = 0,
 
 pub const Error = error{ VariableAlreadyInitialised, NonExistantVariable, ConstVariableModification } || Allocator.Error;
 
 pub fn Create(allocator: Allocator) !*Environment {
     const env = try allocator.create(Environment);
     env.memory = .{};
+    env.parent_env = null;
+    env.child_envs = .{};
+    env.depth = 0;
     return env;
+}
+
+pub fn CreateEnclosed(allocator: Allocator, parent: *Environment) !*Environment {
+    const env = try allocator.create(Environment);
+    env.memory = .{};
+    env.parent_env = parent;
+    env.child_envs = .{};
+    return env;
+}
+
+pub fn add_child(self: *Environment, allocator: Allocator, child: *Environment) !void {
+    try self.child_envs.append(allocator, child);
 }
 
 pub fn deinit(self: *Environment, allocator: Allocator) void {
@@ -19,14 +37,24 @@ pub fn deinit(self: *Environment, allocator: Allocator) void {
     while (kit.next()) |value_ptr| {
         allocator.free(value_ptr.*);
     }
+    for (self.child_envs.items) |i| {
+        i.deinit(allocator);
+    }
+    self.child_envs.deinit(allocator);
+
     self.memory.deinit(allocator);
     allocator.destroy(self);
 }
 
 pub fn get_object(self: *const Environment, key: []const u8, allocator: Allocator) !Object {
-    const output = self.memory.get(key) orelse return .null;
-    const out = try output.value.copy(allocator);
-    return out;
+    const output = self.memory.get(key);
+    if (output) |o| {
+        const out = try o.value.copy(allocator);
+        return out;
+    } else {
+        const env_to_check = self.parent_env orelse return .null;
+        return env_to_check.get_object(key, allocator);
+    }
 }
 
 pub fn get_ident_tag(self: *const Environment, key: []const u8) ?StorageType.Tag {

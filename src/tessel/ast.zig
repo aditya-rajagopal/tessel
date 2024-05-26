@@ -129,7 +129,7 @@ pub const Node = struct {
         /// main_token = (
         /// lhs = node of identifier with function's name
         /// rhs = location in extra_datas array
-        /// the values in extra_data[extra_data[rhs] .
+        /// the argument expressions nodes are in extra_data[rhs..rhs+2]
         FUNCTION_CALL,
 
         pub fn get_operator_string(tag: Tag) []const u8 {
