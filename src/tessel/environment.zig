@@ -1,6 +1,6 @@
 pub const Environment = @This();
 
-memory: std.StringHashMapUnmanaged(StorageType),
+memory: std.AutoHashMapUnmanaged(IdentifierIndex, StorageType),
 parent_env: ?*Environment,
 child_envs: std.ArrayListUnmanaged(*Environment),
 depth: u32 = 0,
@@ -40,14 +40,6 @@ pub fn add_child(self: *Environment, allocator: Allocator, child: *Environment) 
 }
 
 pub fn deinit(self: *Environment, allocator: Allocator) void {
-    var it = self.memory.valueIterator();
-    while (it.next()) |value_ptr| {
-        value_ptr.value.deinit(allocator);
-    }
-    var kit = self.memory.keyIterator();
-    while (kit.next()) |value_ptr| {
-        allocator.free(value_ptr.*);
-    }
     for (self.child_envs.items) |i| {
         i.deinit(allocator);
     }
@@ -57,52 +49,49 @@ pub fn deinit(self: *Environment, allocator: Allocator) void {
     allocator.destroy(self);
 }
 
-pub fn get_object(self: *const Environment, key: []const u8, allocator: Allocator) !Object {
+pub fn get_object(self: *const Environment, key: IdentifierIndex) ObjectIndex {
     const output = self.memory.get(key);
     if (output) |o| {
-        const out = try o.value.copy(allocator);
-        return out;
+        return o.value;
     } else {
-        const env_to_check = self.parent_env orelse return .null;
-        return env_to_check.get_object(key, allocator);
+        const env_to_check = self.parent_env orelse return null_object;
+        return env_to_check.get_object(key);
     }
 }
 
-pub fn get_ident_tag(self: *const Environment, key: []const u8) ?StorageType.Tag {
-    const output = self.memory.get(key) orelse return null;
-    return output.tag;
+pub fn get_object_ptr(self: *const Environment, key: IdentifierIndex) Error!*StorageType {
+    const output = self.memory.getPtr(key);
+    if (output) |o| {
+        return o;
+    } else {
+        const env_to_check = self.parent_env orelse return Error.NonExistantVariable;
+        return env_to_check.get_object_ptr(key);
+    }
 }
 
 pub fn create_variable(
     self: *Environment,
     allocator: Allocator,
-    key: []const u8,
-    value: Object,
+    key: IdentifierIndex,
+    value: ObjectIndex,
     tag: StorageType.Tag,
 ) Error!void {
-    // We create copies of the key and value so that if the source of the key or value
-    // are uninitialized the hashmap is not affected. This does mean that we need to clean these up on evn destruction.
     if (self.memory.contains(key)) {
         return Error.VariableAlreadyInitialised;
     }
 
-    const local_value = try value.copy(allocator);
-    var local_key = std.ArrayList(u8).init(allocator);
-    try local_key.appendSlice(key);
-
-    const storage = StorageType{ .tag = tag, .value = local_value };
-    try self.memory.put(allocator, try local_key.toOwnedSlice(), storage);
-    local_key.deinit();
+    const storage = StorageType{ .tag = tag, .value = value };
+    try self.memory.put(allocator, key, storage);
 }
 
-pub fn update_variable(self: *Environment, allocator: Allocator, key: []const u8, value: Object) Error!void {
-    var value_ptr = self.memory.getPtr(key) orelse return Error.NonExistantVariable;
+pub fn update_variable(self: *Environment, key: IdentifierIndex, value: ObjectIndex) Error!ObjectIndex {
+    var value_ptr = try self.get_object_ptr(key);
     if (value_ptr.tag == .constant) {
         return Error.ConstVariableModification;
     }
-    value_ptr.value.deinit(allocator);
-    const local_value = try value.copy(allocator);
-    value_ptr.value = local_value;
+    const old_value = value_ptr.value;
+    value_ptr.value = value;
+    return old_value;
 }
 
 pub fn print_env_hashmap_stderr(self: *Environment) void {
@@ -110,7 +99,7 @@ pub fn print_env_hashmap_stderr(self: *Environment) void {
     std.debug.print("\tEnvironment Hash map: \n", .{});
     while (it.next()) |value_ptr| {
         std.debug.print(
-            "\tKey: \"{s}\"\t\t Modifiable: {s}\t\t Value: {any}\n",
+            "\tKey: \"{d}\"\t\t Modifiable: {s}\t\t Value: {any}\n",
             .{ value_ptr.key_ptr.*, @tagName(value_ptr.value_ptr.tag), value_ptr.value_ptr.value },
         );
     }
@@ -118,15 +107,46 @@ pub fn print_env_hashmap_stderr(self: *Environment) void {
 
 pub const StorageType = struct {
     tag: Tag,
-    value: Object,
+    value: ObjectIndex,
 
     pub const Tag = enum {
         constant,
         variable,
+        does_not_exist,
     };
 };
+
+test "environment" {
+    const allocator = testing.allocator;
+    var env = try Environment.Create(allocator);
+    defer env.deinit(allocator);
+    const enclosedEnv = try Environment.CreateEnclosed(allocator, env);
+    try env.add_child(allocator, enclosedEnv);
+    try env.create_variable(allocator, 0, 1, .constant);
+    try enclosedEnv.create_variable(allocator, 1, 2, .variable);
+
+    var value = env.get_object(1);
+    try testing.expectEqual(0, value);
+    value = env.get_object(0);
+    try testing.expectEqual(1, value);
+    value = enclosedEnv.get_object(1);
+    try testing.expectEqual(2, value);
+    value = enclosedEnv.get_object(0);
+    try testing.expectEqual(1, value);
+    var err = enclosedEnv.update_variable(0, 3);
+    try testing.expectError(Error.ConstVariableModification, err);
+    err = enclosedEnv.update_variable(2, 3);
+    try testing.expectError(Error.NonExistantVariable, err);
+    const err2 = env.create_variable(allocator, 0, 3, .constant);
+    try testing.expectError(Error.VariableAlreadyInitialised, err2);
+    try enclosedEnv.create_variable(allocator, 0, 3, .constant);
+    value = enclosedEnv.get_object(0);
+    try testing.expectEqual(3, value);
+}
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const Object = @import("object.zig").Object;
+const ObjectIndex = @import("object.zig").ObjectIndex;
+const null_object = @import("object.zig").null_object;
+const IdentifierIndex = @import("identifier_map.zig").IdentifierIndex;

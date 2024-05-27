@@ -36,15 +36,17 @@ pub fn main() !void {
     var buffer: [1024]u8 = undefined;
     var timer = try std.time.Timer.start();
     var env = try Environment.Create(allocator);
+    var eval = try Evaluator.init(allocator);
+    defer eval.deinit(allocator);
     defer env.deinit(allocator);
     var ast = try Parser.parse_program(tessel_fibonacci_35, allocator);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try Evaluator.evaluate_program(&ast, allocator, env);
+    const output = try eval.evaluate_program(&ast, allocator, env);
 
-    defer output.deinit(allocator);
-    const outstr = try output.ToString(&buffer);
+    defer eval.object_pool.free(allocator, output);
+    const outstr = try eval.object_pool.ToString(&buffer, output);
     const end_time = timer.read();
     std.debug.print("Fibonacci in Tessel: result: {s} time: {d}", .{ outstr, std.fmt.fmtDuration(end_time) });
 }

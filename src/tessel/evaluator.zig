@@ -1,79 +1,93 @@
 pub const Evaluator = @This();
 
-pub const Error = error{ReferencingNodeZero} || object.Error;
+object_pool: ObjectPool,
+identifier_map: IdentifierMap,
 
-pub fn evaluate_program(ast: *const Ast, allocator: Allocator, env: *Environment) Error!Object {
+pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
+
+pub fn init(allocator: Allocator) !Evaluator {
+    return Evaluator{
+        .object_pool = try ObjectPool.init(allocator),
+        .identifier_map = IdentifierMap.init(),
+    };
+}
+
+pub fn deinit(self: *Evaluator, allocator: Allocator) void {
+    self.object_pool.deinit(allocator);
+    self.identifier_map.deinit(allocator);
+}
+
+pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: *Environment) Error!ObjectIndex {
     const root_node = ast.nodes.get(0);
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
 
-    return evaluate_program_statements(ast, statements, allocator, env);
+    return self.evaluate_program_statements(ast, statements, allocator, env);
 }
 
-fn evaluate_program_statements(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
+fn evaluate_program_statements(
+    self: *Evaluator,
+    ast: *const Ast,
+    statemnts: []u32,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
     for (statemnts, 0..) |s, i| {
-        const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
-            object.Error.InactiveField => {
-                const output = try std.fmt.allocPrint(
-                    allocator,
-                    "Something has gone terribly wrong. Refer to the GLWTS licence.",
-                    .{},
-                );
-                return Object.Create(.runtime_error, allocator, @ptrCast(&output));
-            },
-            else => |overflow| return overflow,
-        };
+        const obj_pos = try self.eval_statement(ast, s, allocator, env);
 
-        switch (obj) {
+        switch (self.object_pool.get_tag(obj_pos)) {
             .return_expression => {
-                defer obj.deinit(allocator);
-                return obj.return_expression.value;
+                const packed_object = self.object_pool.get_data(obj_pos).return_value;
+                self.object_pool.free(allocator, obj_pos);
+                return packed_object;
             },
             .runtime_error => {
-                return obj;
+                return obj_pos;
             },
             else => {},
         }
 
         if (i == statemnts.len - 1) {
-            return obj;
+            return obj_pos;
         }
-        obj.deinit(allocator);
+        self.object_pool.free(allocator, obj_pos);
     }
-    return .null;
+    return null_object;
 }
 
-fn evaluate_block(ast: *const Ast, statemnts: []u32, allocator: Allocator, env: *Environment) Error!Object {
+fn evaluate_block(
+    self: *Evaluator,
+    ast: *const Ast,
+    statemnts: []u32,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
     for (statemnts, 0..) |s, i| {
-        const obj = eval_statement(ast, s, allocator, env) catch |err| switch (err) {
-            object.Error.InactiveField => {
-                const output = try std.fmt.allocPrint(
-                    allocator,
-                    "Something has gone terribly wrong. Refer to the GLWTS licence.",
-                    .{},
-                );
-                return Object.Create(.runtime_error, allocator, @ptrCast(&output));
-            },
-            else => |overflow| return overflow,
-        };
+        const obj_pos = try self.eval_statement(ast, s, allocator, env);
 
-        switch (obj) {
+        switch (self.object_pool.get_tag(obj_pos)) {
             .return_expression, .runtime_error => {
-                return obj;
+                return obj_pos;
             },
             else => {},
         }
 
         if (i == statemnts.len - 1) {
-            return obj;
+            return obj_pos;
         }
-        obj.deinit(allocator);
+        self.object_pool.free(allocator, obj_pos);
     }
-    return .null;
+    return null_object;
 }
 
-fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator, env: *Environment) !Object {
+fn eval_statement(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node.NodeIndex,
+    allocator: Allocator,
+    env: *Environment,
+) !ObjectIndex {
     if (node >= ast.nodes.len) {
-        return .null;
+        return null_object;
     }
 
     if (node == 0) {
@@ -83,73 +97,84 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
     const ast_node = ast.nodes.get(node);
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
-            return eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+            return self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
         },
         .RETURN_STATEMENT => {
-            const value = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
-            const obj = Object.Create(.return_expression, allocator, @ptrCast(&value));
-            return obj;
+            const value = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+            const return_pos = self.object_pool.create(allocator, .return_expression, @ptrCast(&value));
+            return return_pos;
         },
         .VAR_STATEMENT => {
-            const value = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            if (value.getEnumTag() == .runtime_error) {
-                return value;
+            const value_pos = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            const value_tag = self.object_pool.get_tag(value_pos);
+            if (value_tag == .runtime_error) {
+                return value_pos;
             }
+
             const var_tag = get_token_literal(ast, ast_node.main_token);
             var tag: Environment.StorageType.Tag = .constant;
             if (std.mem.eql(u8, var_tag, "var")) {
                 tag = .variable;
             }
-            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            var actual_value: Object = undefined;
-            switch (value) {
+
+            var actual_pos: ObjectIndex = undefined;
+            switch (value_tag) {
                 .return_expression => {
-                    actual_value = value.return_expression.value;
-                    value.deinit(allocator);
+                    actual_pos = self.object_pool.get_data(value_pos).return_value;
+                    self.object_pool.free(allocator, value_pos);
                 },
                 else => {
-                    actual_value = value;
+                    actual_pos = value_pos;
                 },
             }
-            defer actual_value.deinit(allocator);
-            _ = env.create_variable(allocator, get_token_literal(ast, ident_token), actual_value, tag) catch |err| switch (err) {
+
+            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
+            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
+            _ = env.create_variable(allocator, hash, actual_pos, tag) catch |err| switch (err) {
                 Environment.Error.VariableAlreadyInitialised => {
                     const output = try std.fmt.allocPrint(
                         allocator,
                         "Identifier \"{s}\" has already been initialised",
                         .{get_token_literal(ast, ident_token)},
                     );
-                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
                 Environment.Error.NonExistantVariable => unreachable,
                 Environment.Error.ConstVariableModification => unreachable,
                 Environment.Error.ExceedingMaxDepth => unreachable,
                 else => |overflow| return overflow,
             };
-            return .null;
+            self.object_pool.increase_ref(actual_pos);
+            return null_object;
         },
         .ASSIGNMENT_STATEMENT => {
-            const value = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            var actual_value: Object = undefined;
-            switch (value) {
+            const value_pos = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            const value_tag = self.object_pool.get_tag(value_pos);
+            if (value_tag == .runtime_error) {
+                return value_pos;
+            }
+
+            var actual_pos: ObjectIndex = undefined;
+            switch (value_tag) {
                 .return_expression => {
-                    actual_value = value.return_expression.value;
-                    value.deinit(allocator);
+                    actual_pos = self.object_pool.get_data(value_pos).return_value;
+                    self.object_pool.free(allocator, value_pos);
                 },
                 else => {
-                    actual_value = value;
+                    actual_pos = value_pos;
                 },
             }
-            defer actual_value.deinit(allocator);
+
             const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            env.update_variable(allocator, get_token_literal(ast, ident_token), actual_value) catch |err| switch (err) {
+            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
+            const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
                 Environment.Error.NonExistantVariable => {
                     const output = try std.fmt.allocPrint(
                         allocator,
                         "Identifier \"{s}\" does not exist. Cannot assign anything to it.",
                         .{get_token_literal(ast, ident_token)},
                     );
-                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
                 Environment.Error.ConstVariableModification => {
                     const output = try std.fmt.allocPrint(
@@ -157,34 +182,40 @@ fn eval_statement(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocato
                         "Identifier \"{s}\" is declared as a constant and cannot be modified",
                         .{get_token_literal(ast, ident_token)},
                     );
-                    return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
                 Environment.Error.VariableAlreadyInitialised => unreachable,
                 Environment.Error.ExceedingMaxDepth => unreachable,
                 else => |overflow| return overflow,
             };
+            self.object_pool.free(allocator, old_obj);
 
-            return .null;
+            return null_object;
         },
-        else => return .null,
+        else => unreachable,
     }
 }
 
-fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocator, env: *Environment) Error!Object {
+fn eval_expression(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node.NodeIndex,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
     if (node >= ast.nodes.len) {
-        return .null;
+        return null_object;
     }
 
     if (node == 0) {
         return Error.ReferencingNodeZero;
     }
 
-    // std.debug.print("Env#eval_expression: contains a: {any}\n", .{env.memory.contains("a")});
     const ast_node = ast.nodes.get(node);
-    var obj: Object = undefined;
+    var obj: ObjectIndex = undefined;
     switch (ast_node.tag) {
         .INTEGER_LITERAL => {
-            obj = try Object.Create(.integer, allocator, @ptrCast(&ast.integer_literals[ast_node.node_data.lhs]));
+            obj = try self.object_pool.create(allocator, .integer, @ptrCast(&ast.integer_literals[ast_node.node_data.lhs]));
         },
         .STRING_LITERAL => {
             const output = try std.fmt.allocPrint(
@@ -192,42 +223,43 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
                 "{s}",
                 .{ast.source_buffer[ast_node.node_data.lhs..ast_node.node_data.rhs]},
             );
-            obj = try Object.Create(.string, allocator, @ptrCast(&output));
+            obj = try self.object_pool.create(allocator, .string, @ptrCast(&output));
         },
         .BOOLEAN_LITERAL => {
-            const value = ast_node.node_data.lhs == 1;
-            obj = try Object.Create(.boolean, allocator, @ptrCast(&value));
+            obj = if (ast_node.node_data.lhs == 1) true_object else false_object;
         },
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
-            const value = try env.get_object(ident_name, allocator);
-            if (value.getEnumTag() == .null) {
+            const hash = try self.identifier_map.create(allocator, ident_name);
+            const value_pos = env.get_object(hash);
+            if (value_pos == null_object) {
                 const output = try std.fmt.allocPrint(
                     allocator,
                     "Identifier not found: {s}",
                     .{ident_name},
                 );
-                obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
+                obj = try self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
             } else {
-                return value;
+                self.object_pool.increase_ref(value_pos);
+                return value_pos;
             }
         },
         .NEGATION, .BOOL_NOT => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
-            if (left.getEnumTag() == .runtime_error) return left;
-            obj = try eval_prefix_operation(ast_node.tag, left, allocator);
+            const left = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+            if (self.object_pool.get_tag(left) == .runtime_error) return left;
+            obj = try self.eval_prefix_operation(ast_node.tag, left, allocator);
         },
         .DOUBLE_EQUAL,
         .NOT_EQUAL,
         => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
-            if (left.getEnumTag() == .runtime_error) return left;
-            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            if (right.getEnumTag() == .runtime_error) {
-                defer left.deinit(allocator);
+            const left = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+            if (self.object_pool.get_tag(left) == .runtime_error) return left;
+            const right = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            if (self.object_pool.get_tag(right) == .runtime_error) {
+                self.object_pool.free(allocator, left);
                 return right;
             }
-            obj = try eval_intboolean_infix_operation(ast, &ast_node, left, right, allocator);
+            obj = try self.eval_intboolean_infix_operation(ast, &ast_node, left, right, allocator);
         },
         .LESS_THAN,
         .GREATER_THAN,
@@ -238,86 +270,96 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
         .MULTIPLY,
         .DIVIDE,
         => {
-            const left = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
-            if (left.getEnumTag() == .runtime_error) return left;
-            const right = try eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            if (right.getEnumTag() == .runtime_error) {
-                defer left.deinit(allocator);
+            const left = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+            if (self.object_pool.get_tag(left) == .runtime_error) return left;
+            const right = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
+            if (self.object_pool.get_tag(right) == .runtime_error) {
+                self.object_pool.free(allocator, left);
                 return right;
             }
 
-            obj = try eval_intint_infix_operation(ast, &ast_node, left, right, allocator);
+            obj = try self.eval_infix_operation(ast, &ast_node, left, right, allocator);
         },
-        .NAKED_IF => {
-            obj = try eval_if_expression(ast, ast_node, allocator, env);
-        },
-        .IF_ELSE => {
-            obj = try eval_if_expression(ast, ast_node, allocator, env);
+        .NAKED_IF, .IF_ELSE => {
+            obj = try self.eval_if_expression(ast, ast_node, allocator, env);
         },
         .FUNCTION_EXPRESSION => {
-            obj = try eval_function_expression(ast, ast_node, allocator, env);
+            obj = try self.eval_function_expression(ast, ast_node, allocator, env);
         },
         .FUNCTION_CALL => {
-            obj = try eval_function_call(ast, ast_node, allocator, env);
+            obj = try self.eval_function_call(ast, ast_node, allocator, env);
         },
         else => {
-            return .null;
+            return null_object;
         },
     }
 
     return obj;
 }
 
-fn eval_function_call(ast: *const Ast, node: Ast.Node, allocator: Allocator, env: *Environment) Error!Object {
-    const function_node = ast.nodes.get(node.node_data.lhs);
-    const function = try eval_expression(ast, node.node_data.lhs, allocator, env);
-    defer function.deinit(allocator);
-    if (function.getEnumTag() != .function_expression) {
+fn eval_function_call(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const function = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
+    const function_tag = self.object_pool.get_tag(function);
+    defer self.object_pool.free(allocator, function);
+
+    if (function_tag != .function_expression) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Cannot call on type: {s}",
-            .{@tagName(function_node.tag)},
+            .{self.object_pool.get_tag_string(function)},
         );
-        return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
-    // std.debug.print("Function call\n: {any}\n", .{function.function_expression});
-    // std.debug.print("Function calling node\n: {any}\n", .{node});
-    const arguments = try eval_function_arguments(ast, node.node_data.rhs, allocator, env);
+
+    const arguments = try self.eval_function_arguments(ast, node.node_data.rhs, allocator, env);
     if (arguments.len >= 1) {
-        if (arguments[arguments.len - 1].getEnumTag() == .runtime_error) {
+        const possible_err_tag = self.object_pool.get_tag(arguments[arguments.len - 1]);
+        if (possible_err_tag == .runtime_error) {
             defer allocator.free(arguments);
             if (arguments.len > 1) {
                 for (0..arguments.len - 1) |i| {
-                    arguments[i].deinit(allocator);
+                    self.object_pool.free(allocator, arguments[i]);
                 }
             }
             return arguments[arguments.len - 1];
         }
     }
 
-    return call_function(ast, function, arguments, allocator);
+    return self.call_function(ast, function, arguments, allocator);
 }
 
-fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator: Allocator) Error!Object {
-    const function_expression: *ObjectStructures.FunctionExpressionType = try func.get(.function_expression);
-    const num_expected_params = function_expression.value.parameters.len;
+fn call_function(
+    self: *Evaluator,
+    ast: *const Ast,
+    func: ObjectIndex,
+    args: []const ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    const function_data = self.object_pool.get_data(func);
+    const num_expected_params = function_data.function.parameters_len;
     if (num_expected_params != args.len) {
         const output = try std.fmt.allocPrint(
             allocator,
-            "Calling function with expected: {d} parameters. Got {d}",
+            "Calling function with expected: {d} parameters. Got {d} arguments.",
             .{ num_expected_params, args.len },
         );
-        return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
 
-    const function_body_env = get_function_body_env(ast, function_expression, args, allocator) catch |err| switch (err) {
+    const function_body_env = self.get_function_body_env(ast, function_data, args, allocator) catch |err| switch (err) {
         Environment.Error.ExceedingMaxDepth => {
             const output = try std.fmt.allocPrint(
                 allocator,
                 "Exceeded depth of {d} in function calls.",
                 .{Environment.MaxEnvDepth},
             );
-            return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
         },
         Environment.Error.ConstVariableModification => unreachable,
         Environment.Error.NonExistantVariable => unreachable,
@@ -329,36 +371,39 @@ fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator:
             "Function has parameters with duplicate names. Cannot call this function",
             .{},
         );
-        return Object.Create(.runtime_error, allocator, @ptrCast(&output));
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     };
 
     defer allocator.free(args);
     for (0..args.len) |i| {
-        defer args[i].deinit(allocator);
+        defer self.object_pool.free(allocator, args[i]);
     }
 
-    const out = try evaluate_block(
+    const out = try self.evaluate_block(
         ast,
-        function_expression.value.block_statements,
+        function_data.function.block_ptr[0..function_data.function.block_len],
         allocator,
         function_body_env,
     );
-    switch (out) {
+    const out_type = self.object_pool.get_tag(out);
+    const out_data = self.object_pool.get_data(out);
+    switch (out_type) {
         .return_expression => {
-            defer out.deinit(allocator);
-            switch (out.return_expression.value) {
+            defer self.object_pool.free(allocator, out);
+            const return_value_type = self.object_pool.get_tag(out_data.return_value);
+            switch (return_value_type) {
                 .function_expression => {
-                    try function_expression.value.env.add_child(allocator, function_body_env);
-                    return out.return_expression.value;
+                    try function_data.function.env.add_child(allocator, function_body_env);
+                    return out_data.return_value;
                 },
                 else => {
                     defer function_body_env.deinit(allocator);
-                    return out.return_expression.value;
+                    return out_data.return_value;
                 },
             }
         },
         .function_expression => {
-            try function_expression.value.env.add_child(allocator, function_body_env);
+            try function_data.function.env.add_child(allocator, function_body_env);
             return out;
         },
         else => {
@@ -369,19 +414,21 @@ fn call_function(ast: *const Ast, func: Object, args: []const Object, allocator:
 }
 
 fn get_function_body_env(
+    self: *Evaluator,
     ast: *const Ast,
-    func: *ObjectStructures.FunctionExpressionType,
-    args: []const Object,
+    func: ObjectPool.InternalObject.ObjectData,
+    args: []const ObjectIndex,
     allocator: Allocator,
 ) !?*Environment {
-    const env = try Environment.CreateEnclosed(allocator, func.value.env);
-    if (func.value.parameters.len == 0) {
+    const env = try Environment.CreateEnclosed(allocator, func.function.env);
+    if (func.function.parameters_len == 0) {
         return env;
     }
 
-    for (func.value.parameters, 0..args.len) |param, arg| {
+    for (func.function.parameters_ptr[0..func.function.parameters_len], 0..args.len) |param, arg| {
         const identifier = get_token_literal(ast, ast.nodes.items(.main_token)[param]);
-        _ = env.create_variable(allocator, identifier, args[arg], .constant) catch |err| switch (err) {
+        const hash = try self.identifier_map.create(allocator, identifier);
+        env.create_variable(allocator, hash, args[arg], .constant) catch |err| switch (err) {
             Environment.Error.VariableAlreadyInitialised => {
                 return null;
             },
@@ -389,17 +436,19 @@ fn get_function_body_env(
             Environment.Error.ConstVariableModification => unreachable,
             else => |overflow| return overflow,
         };
+        self.object_pool.increase_ref(args[arg]);
     }
     return env;
 }
 
 fn eval_function_arguments(
+    self: *Evaluator,
     ast: *const Ast,
     expression_location: Ast.Node.NodeIndex,
     allocator: Allocator,
     env: *Environment,
-) ![]Object {
-    var arguments = std.ArrayList(Object).init(allocator);
+) ![]ObjectIndex {
+    var arguments = std.ArrayList(ObjectIndex).init(allocator);
     defer arguments.deinit();
     if (expression_location == 0) {
         return arguments.toOwnedSlice();
@@ -407,16 +456,22 @@ fn eval_function_arguments(
     const expression_range = ast.extra_data[expression_location .. expression_location + 2];
     const expressions = ast.extra_data[expression_range[0]..expression_range[1]];
     for (expressions) |e| {
-        const obj = try eval_expression(ast, e, allocator, env);
-        try arguments.append(obj);
-        if (obj.getEnumTag() == .runtime_error) {
+        const obj_pos = try self.eval_expression(ast, e, allocator, env);
+        try arguments.append(obj_pos);
+        if (self.object_pool.get_tag(obj_pos) == .runtime_error) {
             return arguments.toOwnedSlice();
         }
     }
     return arguments.toOwnedSlice();
 }
 
-fn eval_function_expression(ast: *const Ast, node: Ast.Node, allocator: Allocator, env: *Environment) Error!Object {
+fn eval_function_expression(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
     var parameters = std.ArrayList(Ast.Node.NodeIndex).init(allocator);
     defer parameters.deinit();
     if (node.node_data.lhs != 0) {
@@ -428,6 +483,7 @@ fn eval_function_expression(ast: *const Ast, node: Ast.Node, allocator: Allocato
             try parameters.append(@as(u32, @intCast(i)));
         }
     }
+
     const block_node = ast.nodes.get(node.node_data.rhs);
     const statements = ast.extra_data[block_node.node_data.lhs..block_node.node_data.rhs];
     std.debug.assert(block_node.tag == .BLOCK);
@@ -437,139 +493,172 @@ fn eval_function_expression(ast: *const Ast, node: Ast.Node, allocator: Allocato
     );
     defer block_statements.deinit();
     try block_statements.appendSlice(statements);
-    const function_declaration = ObjectStructures.FunctionValueType{
+    const function_declaration = ObjectPool.InternalObject.FunctionData{
         .parameters = try parameters.toOwnedSlice(),
-        .block_statements = try block_statements.toOwnedSlice(),
+        .block = try block_statements.toOwnedSlice(),
         .env = env,
     };
-    return Object.Create(.function_expression, allocator, @ptrCast(&function_declaration));
+    return self.object_pool.create(allocator, .function_expression, @ptrCast(&function_declaration));
 }
 
-fn eval_prefix_operation(tag: Ast.Node.Tag, value: Object, allocator: Allocator) Error!Object {
+fn eval_prefix_operation(
+    self: *Evaluator,
+    tag: Ast.Node.Tag,
+    value_pos: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    const value_tag = self.object_pool.get_tag(value_pos);
+    const value_data = self.object_pool.get_data(value_pos);
     switch (tag) {
         .BOOL_NOT => {
-            switch (value) {
-                .integer => |i| {
-                    defer value.deinit(allocator);
-                    const result = i.value == 0;
-                    const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-                    return obj;
+            defer self.object_pool.free(allocator, value_pos);
+            switch (value_tag) {
+                .integer => {
+                    const result = value_data.integer == 0;
+                    if (result) {
+                        return true_object;
+                    } else {
+                        return false_object;
+                    }
                 },
-                .boolean => |b| {
-                    b.value = !b.value;
-                    return value;
+                .boolean => {
+                    if (value_data.boolean) {
+                        return false_object;
+                    } else {
+                        return true_object;
+                    }
                 },
                 inline else => {
-                    defer value.deinit(allocator);
-                    const output = try std.fmt.allocPrint(allocator, "Unknown Operation: !<{s}>", .{value.getEnumTagAsString()});
-                    const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
-                    return obj;
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Unknown Operation: !<{s}>",
+                        .{self.object_pool.get_tag_string(value_pos)},
+                    );
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
             }
         },
         .NEGATION => {
-            switch (value) {
-                .integer => |i| {
-                    i.value *= -1;
-                    return value;
+            switch (value_tag) {
+                .integer => {
+                    self.object_pool.object_pool.items(.data)[value_pos].integer *= -1;
+                    return value_pos;
                 },
                 inline else => {
-                    defer value.deinit(allocator);
-                    const output = try std.fmt.allocPrint(allocator, "Unknown Operation: -<{s}>", .{value.getEnumTagAsString()});
-                    const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&output));
-                    return obj;
+                    defer self.object_pool.free(allocator, value_pos);
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Unknown Operation: -<{s}>",
+                        .{self.object_pool.get_tag_string(value_pos)},
+                    );
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
             }
         },
         inline else => unreachable,
     }
-    return value;
+    return null_object;
 }
 
-fn eval_intint_infix_operation(ast: *const Ast, node: *const Ast.Node, left: Object, right: Object, allocator: Allocator) Error!Object {
-    defer left.deinit(allocator);
-    defer right.deinit(allocator);
-    const left_type = left.getEnumTag();
-    const right_type = right.getEnumTag();
+fn eval_infix_operation(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: *const Ast.Node,
+    left: ObjectIndex,
+    right: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    defer self.object_pool.free(allocator, left);
+    defer self.object_pool.free(allocator, right);
 
-    if (left_type != right_type) {
-        const outstr = try std.fmt.allocPrint(
-            allocator,
-            "Type mismatch: <{s}> {s} <{s}>",
-            .{ left.getEnumTagAsString(), get_token_literal(ast, node.main_token), right.getEnumTagAsString() },
-        );
-        const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&outstr));
-        return obj;
-    }
-    if (left_type != .integer) {
+    const left_tag = self.object_pool.get_tag(left);
+    const right_tag = self.object_pool.get_tag(right);
+
+    if (!(left_tag == .integer and right_tag == .integer)) { // or !(left_tag == .string and right_tag == .string)) {
         const outstr = try std.fmt.allocPrint(
             allocator,
             "Unknown Operation: <{s}> {s} <{s}>",
-            .{ left.getEnumTagAsString(), get_token_literal(ast, node.main_token), right.getEnumTagAsString() },
+            .{
+                self.object_pool.get_tag_string(left),
+                get_token_literal(ast, node.main_token),
+                self.object_pool.get_tag_string(right),
+            },
         );
-        const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&outstr));
-        return obj;
+        return try self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
     }
 
-    const l = try left.get(.integer);
-    const r = try right.get(.integer);
+    switch (left_tag) {
+        .integer => return self.eval_intint_infix_operation(node, left, right, allocator),
+        else => unreachable,
+    }
+}
+
+fn eval_intint_infix_operation(
+    self: *Evaluator,
+    node: *const Ast.Node,
+    left: ObjectIndex,
+    right: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    const left_data = self.object_pool.get_data(left);
+    const right_data = self.object_pool.get_data(right);
+    var result: bool = false;
     switch (node.tag) {
         .LESS_THAN => {
-            const result: bool = l.value < r.value;
-            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-            return obj;
+            result = left_data.integer < right_data.integer;
         },
         .GREATER_THAN => {
-            const result: bool = l.value > r.value;
-            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-            return obj;
+            result = left_data.integer > right_data.integer;
         },
         .LESS_THAN_EQUAL => {
-            const result: bool = l.value <= r.value;
-            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-            return obj;
+            result = left_data.integer <= right_data.integer;
         },
         .GREATER_THAN_EQUAL => {
-            const result: bool = l.value >= r.value;
-            const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-            return obj;
+            result = left_data.integer >= right_data.integer;
         },
         .ADDITION => {
-            const result: i64 = l.value + r.value;
-            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
-            return obj;
+            const res: i64 = left_data.integer + right_data.integer;
+            return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .SUBTRACTION => {
-            const result: i64 = l.value - r.value;
-            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
-            return obj;
+            const res: i64 = left_data.integer - right_data.integer;
+            return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .MULTIPLY => {
-            const result: i64 = l.value * r.value;
-            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
-            return obj;
+            const res: i64 = left_data.integer * right_data.integer;
+            return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .DIVIDE => {
-            const result: i64 = @divFloor(l.value, r.value);
-            const obj = try Object.Create(.integer, allocator, @ptrCast(&result));
-            return obj;
+            const res: i64 = @divFloor(left_data.integer, right_data.integer);
+            return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         inline else => unreachable,
     }
-    return .null;
+    if (result) {
+        return true_object;
+    } else {
+        return false_object;
+    }
 }
 
-fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator, env: *Environment) Error!Object {
-    const condition = try eval_expression(ast, ast_node.node_data.lhs, allocator, env);
-
+fn eval_if_expression(
+    self: *Evaluator,
+    ast: *const Ast,
+    ast_node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const condition_pos = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
+    const condition_type = self.object_pool.get_tag(condition_pos);
+    const condition_data = self.object_pool.get_data(condition_pos);
     var result: bool = false;
-    switch (condition) {
-        .integer => |i| result = i.value != 0,
-        .boolean => |b| result = b.value,
-        .runtime_error => return condition,
+    switch (condition_type) {
+        .integer => result = condition_data.integer != 0,
+        .boolean => result = condition_data.boolean,
+        .runtime_error => return condition_pos,
         else => unreachable,
     }
-    defer condition.deinit(allocator);
+    defer self.object_pool.free(allocator, condition_pos);
 
     switch (ast_node.tag) {
         .NAKED_IF => {
@@ -578,9 +667,9 @@ fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator,
                 std.debug.assert(block_node_tag == .BLOCK);
                 const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
                 const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-                return evaluate_block(ast, statements, allocator, env);
+                return self.evaluate_block(ast, statements, allocator, env);
             } else {
-                return .null;
+                return null_object;
             }
         },
         .IF_ELSE => {
@@ -596,96 +685,81 @@ fn eval_if_expression(ast: *const Ast, ast_node: Ast.Node, allocator: Allocator,
                 block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             }
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            return evaluate_block(ast, statements, allocator, env);
+            return self.evaluate_block(ast, statements, allocator, env);
         },
-        inline else => return .null,
+        inline else => unreachable,
     }
 }
 
-fn eval_intboolean_infix_operation(ast: *const Ast, node: *const Ast.Node, left: Object, right: Object, allocator: Allocator) Error!Object {
-    defer left.deinit(allocator);
-    defer right.deinit(allocator);
+fn eval_intboolean_infix_operation(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: *const Ast.Node,
+    left: ObjectIndex,
+    right: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    defer self.object_pool.free(allocator, left);
+    defer self.object_pool.free(allocator, right);
     var result: bool = false;
-    switch (left) {
-        .integer => |il| {
-            switch (right) {
-                .integer => |ir| {
-                    switch (node.tag) {
-                        .DOUBLE_EQUAL => result = il.value == ir.value,
-                        .NOT_EQUAL => result = il.value != ir.value,
-                        inline else => unreachable,
-                    }
-                },
-                .boolean => |br| {
-                    switch (node.tag) {
-                        .DOUBLE_EQUAL => result = (il.value != 0) == br.value,
-                        .NOT_EQUAL => result = (il.value != 0) != br.value,
-                        inline else => unreachable,
-                    }
-                },
-                inline else => {
-                    const outstr = try std.fmt.allocPrint(
-                        allocator,
-                        "Unknown Operation: <{s}> {s} <{s}>",
-                        .{
-                            left.getEnumTagAsString(),
-                            get_token_literal(ast, node.main_token),
-                            right.getEnumTagAsString(),
-                        },
-                    );
-                    const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&outstr));
-                    return obj;
-                },
-            }
-        },
-        .boolean => |bl| {
-            switch (right) {
-                .integer => |ir| {
-                    switch (node.tag) {
-                        .DOUBLE_EQUAL => result = bl.value == (ir.value != 0),
-                        .NOT_EQUAL => result = bl.value != (ir.value != 0),
-                        inline else => unreachable,
-                    }
-                },
-                .boolean => |br| {
-                    switch (node.tag) {
-                        .DOUBLE_EQUAL => result = bl.value == br.value,
-                        .NOT_EQUAL => result = bl.value != br.value,
-                        inline else => unreachable,
-                    }
-                },
-                inline else => {
-                    const outstr = try std.fmt.allocPrint(
-                        allocator,
-                        "Unknown Operation: <{s}> {s} <{s}>",
-                        .{
-                            left.getEnumTagAsString(),
-                            get_token_literal(ast, node.main_token),
-                            right.getEnumTagAsString(),
-                        },
-                    );
-                    const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&outstr));
-                    return obj;
-                },
-            }
-        },
-        inline else => {
-            const outstr = try std.fmt.allocPrint(
-                allocator,
-                "Unknown Operation: <{s}> {s} <{s}>",
-                .{
-                    left.getEnumTagAsString(),
-                    get_token_literal(ast, node.main_token),
-                    right.getEnumTagAsString(),
-                },
-            );
-            const obj = try Object.Create(.runtime_error, allocator, @ptrCast(&outstr));
-            return obj;
-        },
+
+    const left_tag = self.object_pool.get_tag(left);
+    const left_data = self.object_pool.get_data(left);
+    const right_tag = self.object_pool.get_tag(right);
+    const right_data = self.object_pool.get_data(right);
+    if (left_tag == .integer and right_tag == .integer) {
+        switch (node.tag) {
+            .DOUBLE_EQUAL => result = right_data.integer == left_data.integer,
+            .NOT_EQUAL => result = right_data.integer != left_data.integer,
+            inline else => unreachable,
+        }
+    } else {
+        const left_bool = switch (left_tag) {
+            .integer => left_data.integer != 0,
+            .boolean => left_data.boolean,
+            else => {
+                const outstr = try std.fmt.allocPrint(
+                    allocator,
+                    "Unknown Operation: <{s}> {s} <{s}>",
+                    .{
+                        self.object_pool.get_tag_string(left),
+                        get_token_literal(ast, node.main_token),
+                        self.object_pool.get_tag_string(right),
+                    },
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+            },
+        };
+        const right_bool = switch (left_tag) {
+            .integer => right_data.integer != 0,
+            .boolean => right_data.boolean,
+            else => {
+                const outstr = try std.fmt.allocPrint(
+                    allocator,
+                    "Unknown Operation: <{s}> {s} <{s}>",
+                    .{
+                        self.object_pool.get_tag_string(left),
+                        get_token_literal(ast, node.main_token),
+                        self.object_pool.get_tag_string(right),
+                    },
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+            },
+        };
+        switch (node.tag) {
+            .DOUBLE_EQUAL => result = left_bool == right_bool,
+            .NOT_EQUAL => result = left_bool != right_bool,
+            inline else => unreachable,
+        }
     }
-    const obj = try Object.Create(.boolean, allocator, @ptrCast(&result));
-    return obj;
+
+    if (result) {
+        return true_object;
+    } else {
+        return false_object;
+    }
 }
+
 pub fn convert_ast_to_string(ast: *const Ast, root_node: usize, list: *std.ArrayList(u8)) !void {
     if (root_node >= ast.nodes.len) {
         return;
@@ -869,7 +943,7 @@ test "evaluate_integer_expressions" {
 
     try eval_tests(&tests, false);
 }
-
+//
 test "evaluate_if_else_expressions" {
     const tests = [_]test_struct{
         .{ .source = "if (true) { 10 }", .output = "10" },
@@ -901,6 +975,7 @@ test "evaluate_return_statements" {
 
 test "evaluate_function_expressions" {
     const tests = [_]test_struct{
+        .{ .source = "const a = fn(x, y) { x + y};", .output = "null" },
         .{ .source = "fn(x, y) { x + y}(1, 2)", .output = "3" },
         .{ .source = "const a = fn(x, y) { x + y }; a(2, 4);", .output = "6" },
         .{ .source = "const call_fn = fn(x, y) { x(y) }; call_fn(fn(x) { return 2 * x; }, 4);", .output = "8" },
@@ -913,15 +988,31 @@ test "evaluate_function_expressions" {
             \\  const fn_call = fn(x) {
             \\      const b = fn(y) {
             \\          x + y
-            \\      }; 
-            \\      return b; 
-            \\  }; 
+            \\      };
+            \\      return b;
+            \\  };
             \\  const a = fn_call(2);
-            \\  const b = fn_call(3); 
+            \\  const b = fn_call(3);
             \\  b(3);
             \\  b(7);
             ,
             .output = "10",
+        },
+        .{
+            .source =
+            \\  const a = 10;
+            \\  const fn_call = fn(x) {
+            \\      const b = fn(y) {
+            \\          a + x + y
+            \\      };
+            \\      return b;
+            \\  };
+            \\  const add_two = fn_call(2);
+            \\  const add_three = fn_call(3);
+            \\  add_three(3);
+            \\  add_three(7);
+            ,
+            .output = "20",
         },
         .{ .source = "const add = fn(x, y) { return x + y; }; add( 5 * 5, add(5, 5))", .output = "35" },
         .{ .source = "const b = fn() { 10; }; const add = fn(a, b) { a() + b }; add(b, 10);", .output = "20" },
@@ -953,9 +1044,10 @@ test "evaluate_identifiers" {
 
     try eval_tests(&tests, false);
 }
+
 test "evaluate_errors" {
     const tests = [_]test_struct{
-        .{ .source = "5 + true", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "5 + true", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
         .{ .source = "foobar", .output = "Identifier not found: foobar" },
         .{ .source = "foobar * 10", .output = "Identifier not found: foobar" },
         .{ .source = "5; fizzbuzz * 10", .output = "Identifier not found: fizzbuzz" },
@@ -963,10 +1055,10 @@ test "evaluate_errors" {
         .{ .source = "if ( 1 + 2 < 10 ) { 10; c; return b + 5; }", .output = "Identifier not found: c" },
         .{ .source = "true - true", .output = "Unknown Operation: <BOOLEAN> - <BOOLEAN>" },
         .{ .source = "-true", .output = "Unknown Operation: -<BOOLEAN>" },
-        .{ .source = "if ( 1 < 10 ) { return false + 5; }", .output = "Type mismatch: <BOOLEAN> + <INTEGER>" },
-        .{ .source = "if ( 1 + true < 10 ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
-        .{ .source = "if ( 10 > 1 + true ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
-        .{ .source = "5 + 5; 5 + true; if ( 1 < 10 ) { return false + 5; }", .output = "Type mismatch: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "if ( 1 < 10 ) { return false + 5; }", .output = "Unknown Operation: <BOOLEAN> + <INTEGER>" },
+        .{ .source = "if ( 1 + true < 10 ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "if ( 10 > 1 + true ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
+        .{ .source = "5 + 5; 5 + true; if ( 1 < 10 ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
         .{ .source = "const a = 10; a = 11;", .output = "Identifier \"a\" is declared as a constant and cannot be modified" },
         .{ .source = "const a = 10; b = 11;", .output = "Identifier \"b\" does not exist. Cannot assign anything to it." },
         .{ .source = "const a = 10; const a = 11;", .output = "Identifier \"a\" has already been initialised" },
@@ -979,16 +1071,21 @@ test "evaluate_errors" {
 fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
     var buffer: [1024]u8 = undefined;
     for (tests) |t| {
+        if (enable_debug_print) {
+            std.debug.print("Testing: Source: {s}\n", .{t.source});
+        }
         var env = try Environment.Create(testing.allocator);
+        var eval = try Evaluator.init(testing.allocator);
+        defer eval.deinit(testing.allocator);
         defer env.deinit(testing.allocator);
         var ast = try Parser.parse_program(t.source, testing.allocator);
         defer ast.deinit(testing.allocator);
 
-        const output = try Evaluator.evaluate_program(&ast, testing.allocator, env);
-        defer output.deinit(testing.allocator);
-        const outstr = try output.ToString(&buffer);
+        const output = try eval.evaluate_program(&ast, testing.allocator, env);
+        defer eval.object_pool.free(testing.allocator, output);
+        const outstr = try eval.object_pool.ToString(&buffer, output);
         if (enable_debug_print) {
-            std.debug.print("Testing: Source: {s}\n Expected: {s} \t Got: {s}\n", .{ t.source, t.output, outstr });
+            std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });
         }
         try testing.expectEqualSlices(u8, t.output, outstr);
     }
@@ -1001,7 +1098,10 @@ const token = @import("token.zig");
 const Environment = @import("environment.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
-const object = @import("object.zig");
-const Object = object.Object;
-const ObjectStructures = object.ObjectStructures;
-const ObjectTypes = object.ObjectTypes;
+const ObjectPool = @import("object.zig");
+const ObjectTypes = ObjectPool.ObjectTypes;
+const ObjectIndex = ObjectPool.ObjectIndex;
+const null_object = ObjectPool.null_object;
+const true_object = ObjectPool.true_object;
+const false_object = ObjectPool.false_object;
+const IdentifierMap = @import("identifier_map.zig");

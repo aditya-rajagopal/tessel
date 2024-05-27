@@ -18,19 +18,13 @@ pub fn start(allocator: Allocator) !void {
 
     try print_header(stdout);
     try bw.flush();
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // const allocator = gpa.allocator();
-    // defer {
-    //     const deinit_status = gpa.deinit();
-    //     if (deinit_status == .leak) {
-    //         @panic("memory leak");
-    //     }
-    // }
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
     var env = try Environment.Create(allocator);
-
+    defer env.deinit(allocator);
+    var eval = try Evaluator.init(allocator);
+    defer eval.deinit(allocator);
     while (true) {
         try stdout.print("{s}", .{PROMT});
         try bw.flush();
@@ -85,26 +79,17 @@ pub fn start(allocator: Allocator) !void {
             // try bw.flush();
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
-            const output = try Evaluator.evaluate_program(&ast, allocator, env);
-            defer output.deinit(allocator);
-            const outstr = output.ToString(&buffer) catch |err| switch (err) {
-                object.Error.NonStringifibaleObject => {
-                    try stdout.print("Unable to parse this program yet!\n", .{});
-                    try bw.flush();
-                    continue;
-                },
-                else => |overflow| return overflow,
-            };
-
-            switch (output) {
+            const output = try eval.evaluate_program(&ast, allocator, env);
+            defer eval.object_pool.free(allocator, output);
+            const outstr = try eval.object_pool.ToString(&buffer, output);
+            const tag = eval.object_pool.get_tag(output);
+            switch (tag) {
                 .null => {},
                 else => try stdout.print("Output >> {s}\n", .{outstr}),
             }
             try bw.flush();
         }
     }
-
-    env.deinit(allocator);
 }
 
 fn print_header(stdout: anytype) !void {

@@ -5,6 +5,7 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
@@ -19,25 +20,29 @@ pub fn main() !void {
     }
 
     var file = try std.fs.cwd().openFile(file_name, .{});
-    // var file = std.fs.openFileAbsolute(file_name, .{}) catch return;
     defer file.close();
     var buffer: [10240]u8 = undefined;
     const out = try file.reader().readAll(&buffer);
-    // std.debug.print("File: {s}", .{buffer[0..out]});
     var out_buffer: [1024]u8 = undefined;
+    buffer[out] = 0;
     var timer = try std.time.Timer.start();
+
     var env = try Environment.Create(allocator);
     defer env.deinit(allocator);
+    var eval = try Evaluator.init(allocator);
+    defer eval.deinit(allocator);
+
     var ast = try Parser.parse_program(buffer[0..out :0], allocator);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try Evaluator.evaluate_program(&ast, allocator, env);
+    const output = try eval.evaluate_program(&ast, allocator, env);
 
-    defer output.deinit(allocator);
-    const outstr = try output.ToString(&out_buffer);
+    defer eval.object_pool.free(allocator, output);
+    const outstr = try eval.object_pool.ToString(&out_buffer, output);
     const end_time = timer.read();
-    std.debug.print("Fibonacci in Tessel: result: {s} time: {d}", .{ outstr, std.fmt.fmtDuration(end_time) });
+    std.debug.print("{s}\n", .{outstr});
+    std.debug.print("Program runtime: {d}\n", .{std.fmt.fmtDuration(end_time)});
 }
 
 const lexer = @import("tessel/lexer.zig");
