@@ -80,6 +80,9 @@ pub const Node = struct {
         /// main_token is the location of the litera
         /// lhs = 0 if false literal and 1 if true literal
         BOOLEAN_LITERAL,
+        /// main_token is the location of the litera
+        /// lhs = start of the string in sourc rhs = end of string
+        STRING_LITERAL,
         /// ! lhs. rhs is empty.
         BOOL_NOT,
         /// - lhs. rhs is empty

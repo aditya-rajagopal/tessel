@@ -186,6 +186,14 @@ fn eval_expression(ast: *const Ast, node: Ast.Node.NodeIndex, allocator: Allocat
         .INTEGER_LITERAL => {
             obj = try Object.Create(.integer, allocator, @ptrCast(&ast.integer_literals[ast_node.node_data.lhs]));
         },
+        .STRING_LITERAL => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "{s}",
+                .{ast.source_buffer[ast_node.node_data.lhs..ast_node.node_data.rhs]},
+            );
+            obj = try Object.Create(.string, allocator, @ptrCast(&output));
+        },
         .BOOLEAN_LITERAL => {
             const value = ast_node.node_data.lhs == 1;
             obj = try Object.Create(.boolean, allocator, @ptrCast(&value));

@@ -105,6 +105,17 @@ pub fn next_token(self: *Lexer) token.Token {
         '}' => tok.type = .RBRACE,
         ',' => tok.type = .COMMA,
         ';' => tok.type = .SEMICOLON,
+        '"' => {
+            self.read_next_character();
+            tok.type = .STRING;
+            tok.loc.start = self.position;
+            self.read_string_literal();
+            tok.loc.end = self.position;
+            if (self.ch_current == '"') {
+                self.read_next_character();
+            }
+            return tok;
+        },
         0 => {
             tok.loc.end = self.position;
             return tok;
@@ -236,6 +247,18 @@ fn read_number_literal(self: *Lexer) bool {
     return is_float;
 }
 
+fn read_string_literal(self: *Lexer) void {
+    while (true) {
+        if (self.ch_current == '"') {
+            break;
+        }
+        if (self.ch_current == 0) {
+            break;
+        }
+        self.read_next_character();
+    }
+}
+
 fn skip_white_spaces(self: *Lexer) void {
     while (self.ch_current == ' ' or self.ch_current == '\t' or self.ch_current == '\n' or self.ch_current == '\r') {
         self.read_next_character();
@@ -271,6 +294,8 @@ test "test_lexing" {
         \\ 9 <= 10;// Comments close to the previous character should be skipped
         \\
         \\ // Comment at the end of the file should also be skipped correctly
+        \\ "foobar"
+        \\ "foo bar"
     ;
 
     const tests = [_]struct { expectedType: token.TokenType, expectedLiteral: []const u8 }{
@@ -355,6 +380,8 @@ test "test_lexing" {
         .{ .expectedType = .LTE, .expectedLiteral = "<=" },
         .{ .expectedType = .INT, .expectedLiteral = "10" },
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
+        .{ .expectedType = .STRING, .expectedLiteral = "foobar" },
+        .{ .expectedType = .STRING, .expectedLiteral = "foo bar" },
         .{ .expectedType = .EOF, .expectedLiteral = "" },
     };
     var lex = Lexer.init(input);

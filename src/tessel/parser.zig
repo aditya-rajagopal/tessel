@@ -414,6 +414,18 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
                 .node_data = .{ .lhs = location, .rhs = 0 },
             });
         },
+        .STRING => {
+            const start = self.token_starts[self.token_current];
+            const end = self.token_ends[self.token_current];
+            return self.add_node(.{
+                .tag = .STRING_LITERAL, //
+                .main_token = self.next_token(),
+                .node_data = .{
+                    .lhs = start,
+                    .rhs = end,
+                },
+            });
+        },
         .FALSE => return self.add_node(.{
             .tag = .BOOLEAN_LITERAL, //
             .main_token = self.next_token(),

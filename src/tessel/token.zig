@@ -10,6 +10,7 @@ pub const TokenType = enum {
     // Literals
     INT,
     FLOAT,
+    STRING,
 
     // Operators
     ASSIGN,
