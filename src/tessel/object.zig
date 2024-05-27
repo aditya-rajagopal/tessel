@@ -1,8 +1,116 @@
 pub const Error = error{ NonStringifibaleObject, InactiveField } || Allocator.Error;
 
+pub const ObjectPool = @This();
+
+object_pool: std.MultiArrayList(InternalObject),
+free_list: std.ArrayListUnmanaged(ObjectIndex),
+
+pub const ObjectIndex = u32;
+
+pub const null_object: ObjectIndex = 0;
+pub const true_object: ObjectIndex = 1;
+pub const false_object: ObjectIndex = 2;
+
+pub fn Create(allocator: Allocator) !ObjectPool {
+    return CreateCapacity(allocator, 0);
+}
+
+pub fn CreateCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
+    const internal_capacity = capacity + 3;
+    var pool = ObjectPool{
+        .object_pool = .{},
+        .free_list = .{},
+    };
+    try pool.object_pool.ensureUnusedCapacity(allocator, internal_capacity);
+    try pool.free_list.ensureUnusedCapacity(allocator, internal_capacity);
+    for (0..internal_capacity) |i| {
+        try pool.free_list.append(allocator, @as(ObjectIndex, @intCast(internal_capacity - 1 - i)));
+        try pool.object_pool.append(allocator, InternalObject{ .tag = .null, .data = undefined });
+    }
+
+    // 0 will always be a null node and will be referenced when .null is needed
+    _ = pool.free_list.popOrNull() orelse unreachable;
+    // 1 will be the true node and again will be referenced
+    const true_loc = pool.free_list.popOrNull() orelse unreachable;
+    pool.object_pool.items(.tag)[true_loc] = .boolean;
+    pool.object_pool.items(.data)[true_loc].boolean = true;
+    // 2 will be the false node and again will be referenced
+    const false_loc = pool.free_list.popOrNull() orelse unreachable;
+    pool.object_pool.items(.tag)[false_loc] = .boolean;
+    pool.object_pool.items(.data)[false_loc].boolean = false;
+    return pool;
+}
+
+pub fn create_object(self: *ObjectPool, tag: ObjectTypes, data: *const anyopaque) !ObjectIndex {
+    if (tag == .null) {
+        return null_object;
+    }
+
+    if (tag == .boolean) {
+        const value: *const bool = @ptrCast(@alignCast(data));
+        if (value.*) {
+            return true_object;
+        } else {
+            return false_object;
+        }
+    }
+
+    if (self.free_list.items.len == 0) {} else {
+        const free_loc = self.free_list.popOrNull() orelse unreachable;
+        // var obj: InternalObject.ObjectData = undefined;
+        switch (tag) {
+            .integer => {
+                const value: *const i64 = @ptrCast(@alignCast(data));
+                self.object_pool.items(.tag)[free_loc] = .integer;
+                self.object_pool.items(.data)[free_loc].integer = value.*;
+            },
+            .string => {},
+            .return_expression => {},
+            .function_expression => {},
+            .runtime_error => {},
+            .null => unreachable,
+            .boolean => unreachable,
+        }
+        return free_loc;
+    }
+    return 0;
+}
+
+pub fn get(self: *ObjectPool, position: ObjectIndex) InternalObject {
+    return self.object_pool.get(position);
+}
+
+pub const InternalObject = struct {
+    tag: ObjectTypes,
+    data: ObjectData,
+
+    pub const ObjectData = extern union {
+        integer: i64,
+        boolean: bool,
+        return_value: ObjectIndex,
+        function_expression: FunctionExpression,
+        runtime_error: StringType,
+        string_type: StringType,
+    };
+
+    pub const FunctionExpression = extern struct {
+        block_statements: [*]Ast.Node.NodeIndex,
+        block_len: u32,
+        parameters: [*]Ast.Node.NodeIndex,
+        parameter_len: u32,
+        env: *Environment,
+    };
+
+    pub const StringType = extern struct {
+        string: [*]const u8,
+        length: u32,
+    };
+};
+
 pub const ObjectTypes = enum {
     integer,
     boolean,
+    string,
     return_expression,
     function_expression,
     runtime_error,
@@ -30,6 +138,10 @@ pub const ObjectStructures = struct {
         value: []const u8,
     };
 
+    pub const StringType = struct {
+        value: []u8,
+    };
+
     pub const FunctionValueType = struct {
         block_statements: []Ast.Node.NodeIndex,
         parameters: []Ast.Node.NodeIndex,
@@ -37,7 +149,7 @@ pub const ObjectStructures = struct {
     };
 
     pub const StringStorage = struct {
-        string: []const u8,
+        string: []u8,
     };
 
     // pub const ReturnTypeUnion = union(enum) {
@@ -51,6 +163,7 @@ pub const ObjectStructures = struct {
 pub const Object = union(ObjectTypes) {
     integer: *ObjectStructures.IntegerType,
     boolean: *ObjectStructures.BooleanType,
+    string: *ObjectStructures.StringType,
     return_expression: *ObjectStructures.ReturnType,
     function_expression: *ObjectStructures.FunctionExpressionType,
     runtime_error: *ObjectStructures.RuntimeErrorType,
@@ -74,6 +187,7 @@ pub const Object = union(ObjectTypes) {
         return switch (self) {
             .integer => "INTEGER",
             .boolean => "BOOLEAN",
+            .string => "STRING",
             .return_expression => "RETURN EXPRESSION",
             .function_expression => "FUNCTION EXPRESSION",
             .runtime_error => "RUNTIME ERROR",
@@ -85,6 +199,7 @@ pub const Object = union(ObjectTypes) {
         return switch (self) {
             .integer => .integer,
             .boolean => .boolean,
+            .string => .string,
             .return_expression => .return_expression,
             .function_expression => .function_expression,
             .runtime_error => .runtime_error,
@@ -103,6 +218,12 @@ pub const Object = union(ObjectTypes) {
                 const obj = try allocator.create(ObjectStructures.BooleanType);
                 obj.value = b.value;
                 return Object{ .boolean = obj };
+            },
+            .string => |s| {
+                var obj = try allocator.create(ObjectStructures.StringType);
+                obj.value = try allocator.alloc(u8, s.value.len);
+                @memcpy(obj.value, s.value);
+                return Object{ .string = obj };
             },
             .return_expression => |r| {
                 const obj = try allocator.create(ObjectStructures.ReturnType);
@@ -144,6 +265,14 @@ pub const Object = union(ObjectTypes) {
                 obj.value = value.*;
                 return Object{ .boolean = obj };
             },
+            .string => {
+                const value: *const ObjectStructures.StringStorage = @ptrCast(@alignCast(data));
+                var obj = try allocator.create(ObjectStructures.StringType);
+                // obj.value = try allocator.alloc(u8, value.string.len);
+                // @memcpy(obj.value, value.string);
+                obj.value = value.string;
+                return Object{ .string = obj };
+            },
             .return_expression => {
                 const obj = try allocator.create(ObjectStructures.ReturnType);
                 const value: *const Object = @ptrCast(@alignCast(data));
@@ -180,6 +309,10 @@ pub const Object = union(ObjectTypes) {
         switch (self.*) {
             .integer => |i| allocator.destroy(i),
             .boolean => |b| allocator.destroy(b),
+            .string => |s| {
+                allocator.free(s.value);
+                allocator.destroy(s);
+            },
             .return_expression => |r| allocator.destroy(r),
             .function_expression => |f| {
                 allocator.free(f.value.block_statements);
@@ -202,6 +335,7 @@ pub const Object = union(ObjectTypes) {
             } else {
                 return std.fmt.bufPrint(buffer, "false", .{});
             },
+            .string => |s| return s.value,
             .runtime_error => |e| return e.value,
             .null => return std.fmt.bufPrint(buffer, "null", .{}),
             .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
