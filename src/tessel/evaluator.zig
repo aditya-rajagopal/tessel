@@ -306,6 +306,9 @@ fn eval_function_call(
 ) Error!ObjectIndex {
     const function = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
     const function_tag = self.object_pool.get_tag(function);
+    if (function_tag == .runtime_error) {
+        return function;
+    }
     defer self.object_pool.free(allocator, function);
 
     if (function_tag != .function_expression) {
@@ -574,7 +577,7 @@ fn eval_infix_operation(
     const left_tag = self.object_pool.get_tag(left);
     const right_tag = self.object_pool.get_tag(right);
 
-    if (!(left_tag == .integer and right_tag == .integer)) { // or !(left_tag == .string and right_tag == .string)) {
+    if (!(left_tag == .integer and right_tag == .integer) and !(left_tag == .string and right_tag == .string)) {
         const outstr = try std.fmt.allocPrint(
             allocator,
             "Unknown Operation: <{s}> {s} <{s}>",
@@ -589,7 +592,42 @@ fn eval_infix_operation(
 
     switch (left_tag) {
         .integer => return self.eval_intint_infix_operation(node, left, right, allocator),
+        .string => return self.eval_string_infix_operation(ast, node, left, right, allocator),
         else => unreachable,
+    }
+}
+
+fn eval_string_infix_operation(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: *const Ast.Node,
+    left: ObjectIndex,
+    right: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    const left_data = self.object_pool.get_data(left).string_type;
+    const right_data = self.object_pool.get_data(right).string_type;
+    switch (node.tag) {
+        .ADDITION => {
+            const outstr = try std.fmt.allocPrint(
+                allocator,
+                "{s}{s}",
+                .{ left_data.ptr[0..left_data.len], right_data.ptr[0..right_data.len] },
+            );
+            return self.object_pool.create(allocator, .string, @ptrCast(&outstr));
+        },
+        inline else => {
+            const outstr = try std.fmt.allocPrint(
+                allocator,
+                "Unknown Operation: <{s}> {s} <{s}>",
+                .{
+                    self.object_pool.get_tag_string(left),
+                    get_token_literal(ast, node.main_token),
+                    self.object_pool.get_tag_string(right),
+                },
+            );
+            return try self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+        },
     }
 }
 
@@ -943,7 +981,34 @@ test "evaluate_integer_expressions" {
 
     try eval_tests(&tests, false);
 }
-//
+
+test "evaluate_string_expressions" {
+    const tests = [_]test_struct{
+        .{ .source = "\"foobar\"", .output = "foobar" },
+        .{ .source = "const a = \"foobar\"; a;", .output = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .output = "foobar" },
+        .{
+            .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
+            .output = "foobaz barbaz",
+        },
+        .{
+            .source =
+            \\  const fn_call = fn(x) {
+            \\      const b = fn(y) {
+            \\          x + y
+            \\      };
+            \\      return b;
+            \\  };
+            \\  const add_foo = fn_call("foo");
+            \\  add_foo("bar");
+            ,
+            .output = "foobar",
+        },
+    };
+
+    try eval_tests(&tests, false);
+}
+
 test "evaluate_if_else_expressions" {
     const tests = [_]test_struct{
         .{ .source = "if (true) { 10 }", .output = "10" },
