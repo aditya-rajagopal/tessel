@@ -30,6 +30,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
             InternalObject{
                 .tag = .null,
                 .data = .{ .integer = @as(i64, @intCast(0)) },
+                .refs = 0,
             },
         );
     }
@@ -121,6 +122,7 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
         .null => unreachable,
         .boolean => unreachable,
     }
+    self.object_pool.items(.refs)[location] = 0;
     try self.free_list.ensureTotalCapacity(allocator, self.object_pool.len);
     return location;
 }
@@ -130,11 +132,14 @@ pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void
     if (position < 3) {
         return;
     }
-
-    _ = self.free_possible_memory(allocator, position);
-    self.object_pool.items(.tag)[position] = .null;
-    self.object_pool.items(.data)[position].integer = 0;
-    self.free_list.appendAssumeCapacity(position);
+    if (self.object_pool.items(.refs)[position] == 0) {
+        _ = self.free_possible_memory(allocator, position);
+        self.object_pool.items(.tag)[position] = .null;
+        self.object_pool.items(.data)[position].integer = 0;
+        self.free_list.appendAssumeCapacity(position);
+    } else {
+        self.object_pool.items(.refs)[position] -= 1;
+    }
 }
 
 fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) bool {
@@ -185,6 +190,15 @@ pub fn get_data(self: *ObjectPool, position: ObjectIndex) InternalObject.ObjectD
     return self.object_pool.items(.data)[position];
 }
 
+pub fn increase_ref(self: *ObjectPool, position: ObjectIndex) void {
+    std.debug.assert(position <= self.object_pool.len);
+    if (position < 3) {
+        return;
+    }
+
+    self.object_pool.items(.refs)[position] += 1;
+}
+
 pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const u8 {
     switch (self.get_tag(position)) {
         .integer => return std.fmt.bufPrint(buffer, "{d}", .{self.get_data(position).integer}),
@@ -223,6 +237,7 @@ pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
 pub const InternalObject = struct {
     tag: ObjectTypes,
     data: ObjectData,
+    refs: u32,
 
     pub const ObjectData = extern union {
         integer: i64,

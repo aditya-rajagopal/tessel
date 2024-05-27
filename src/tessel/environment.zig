@@ -32,7 +32,6 @@ pub fn CreateEnclosed(allocator: Allocator, parent: *Environment) !*Environment 
     env.parent_env = parent;
     env.child_envs = .{};
     env.depth = parent.depth + 1;
-    parent.add_child(allocator, env);
     return env;
 }
 
@@ -90,12 +89,14 @@ pub fn create_variable(
     local_key.deinit();
 }
 
-pub fn update_variable(self: *Environment, key: []const u8, value: ObjectIndex) Error!void {
+pub fn update_variable(self: *Environment, key: []const u8, value: ObjectIndex) Error!ObjectIndex {
     var value_ptr = self.memory.getPtr(key) orelse return Error.NonExistantVariable;
     if (value_ptr.tag == .constant) {
         return Error.ConstVariableModification;
     }
+    const old_value = value_ptr.value;
     value_ptr.value = value;
+    return old_value;
 }
 
 pub fn print_env_hashmap_stderr(self: *Environment) void {
