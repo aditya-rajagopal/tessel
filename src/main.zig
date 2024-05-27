@@ -41,7 +41,7 @@ pub fn main() !void {
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
 
     const buf = try std.fmt.allocPrint(allocator, "This is a sample string {d}\n", .{integer});
-    defer allocator.free(buf);
+    // defer allocator.free(buf);
     const str_pos = try eval.object_pool.create(allocator, .string, @ptrCast(&buf));
     std.debug.print("Stored_position of string: {d}\n", .{str_pos});
     const str = eval.object_pool.get(str_pos).data.string_type;
@@ -49,12 +49,12 @@ pub fn main() !void {
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Freeing the string value\n", .{});
     std.debug.print("Length of object pool: {d}\n", .{eval.object_pool.object_pool.len});
-    try eval.object_pool.free(allocator, str_pos);
+    eval.object_pool.free(allocator, str_pos);
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Value: tag {s} {any}\n", .{ @tagName(eval.object_pool.get(str_pos).tag), eval.object_pool.get(str_pos).data.string_type });
 
     const err_buf = try std.fmt.allocPrint(allocator, "This is a sample Error {d}\n", .{integer});
-    defer allocator.free(err_buf);
+    // defer allocator.free(err_buf);
     const err_pos = try eval.object_pool.create(allocator, .runtime_error, @ptrCast(&err_buf));
     std.debug.print("Stored_position of Runtime Error: {d}\n", .{err_pos});
     const str_err = eval.object_pool.get(str_pos).data.string_type;
@@ -62,7 +62,7 @@ pub fn main() !void {
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Freeing the string value\n", .{});
     std.debug.print("Length of object pool: {d}\n", .{eval.object_pool.object_pool.len});
-    try eval.object_pool.free(allocator, err_pos);
+    eval.object_pool.free(allocator, err_pos);
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Value: tag {s} {any}\n", .{ @tagName(eval.object_pool.get(err_pos).tag), eval.object_pool.get(err_pos).data.string_type });
 
@@ -72,17 +72,19 @@ pub fn main() !void {
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Freeing the string value\n", .{});
     std.debug.print("Length of object pool: {d}\n", .{eval.object_pool.object_pool.len});
-    try eval.object_pool.free(allocator, return_expr);
+    eval.object_pool.free(allocator, return_expr);
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Value: tag {s} {any}\n", .{ @tagName(eval.object_pool.get(return_expr).tag), eval.object_pool.get(return_expr).data.return_value });
 
-    var blocks = [_]u32{ 1, 2, 3, 5 };
-    var params = [_]u32{ 1, 2 };
+    var blocks = std.ArrayList(u32).init(allocator);
+    try blocks.appendSlice(&[_]u32{ 1, 2, 3, 5 });
+    var params = std.ArrayList(u32).init(allocator);
+    try params.appendSlice(&[_]u32{ 1, 2 });
     const env = try Environment.Create(allocator);
     defer env.deinit(allocator);
     const func_data = object.InternalObject.FunctionData{
-        .block = blocks[0..4],
-        .parameters = params[0..2],
+        .block = try blocks.toOwnedSlice(),
+        .parameters = try params.toOwnedSlice(),
         .env = env,
     };
     const func_loc = try eval.object_pool.create(allocator, .function_expression, @ptrCast(&func_data));
@@ -92,7 +94,7 @@ pub fn main() !void {
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Freeing the string value\n", .{});
     std.debug.print("Length of object pool: {d}\n", .{eval.object_pool.object_pool.len});
-    try eval.object_pool.free(allocator, func_loc);
+    eval.object_pool.free(allocator, func_loc);
     std.debug.print("Free List after: {any}\n", .{eval.object_pool.free_list.items});
     std.debug.print("Value: tag {s} {any}\n", .{ @tagName(eval.object_pool.get(func_loc).tag), eval.object_pool.get(func_loc).data.integer });
 

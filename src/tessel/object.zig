@@ -90,48 +90,51 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
         .function_expression => {
             const value: *const InternalObject.FunctionData = @ptrCast(@alignCast(data));
             self.object_pool.items(.tag)[location] = .function_expression;
-            const block = try allocator.alloc(Ast.Node.NodeIndex, value.block.len);
-            const parameter = try allocator.alloc(Ast.Node.NodeIndex, value.parameters.len);
-            self.object_pool.items(.data)[location].function.block_ptr = block.ptr;
+            // const block = try allocator.alloc(Ast.Node.NodeIndex, value.block.len);
+            // const parameter = try allocator.alloc(Ast.Node.NodeIndex, value.parameters.len);
+            self.object_pool.items(.data)[location].function.block_ptr = value.block.ptr;
             self.object_pool.items(.data)[location].function.block_len = @as(u32, @intCast(value.block.len));
-            self.object_pool.items(.data)[location].function.parameters_ptr = parameter.ptr;
+            self.object_pool.items(.data)[location].function.parameters_ptr = value.parameters.ptr;
             self.object_pool.items(.data)[location].function.parameters_len = @as(u32, @intCast(value.parameters.len));
             self.object_pool.items(.data)[location].function.env = value.env;
-            @memcpy(self.object_pool.items(.data)[location].function.block_ptr, value.block);
-            @memcpy(self.object_pool.items(.data)[location].function.parameters_ptr, value.parameters);
+            // @memcpy(self.object_pool.items(.data)[location].function.block_ptr, value.block);
+            // @memcpy(self.object_pool.items(.data)[location].function.parameters_ptr, value.parameters);
         },
         .runtime_error => {
             const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
             self.object_pool.items(.tag)[location] = .runtime_error;
-            const string_ptr = try allocator.alloc(u8, value.len);
-            self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
+            // const string_ptr = try allocator.alloc(u8, value.len);
+            // self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
+            self.object_pool.items(.data)[location].string_type.ptr = value.ptr;
             self.object_pool.items(.data)[location].string_type.len = value.len;
-            @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
+            // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
         },
         .string => {
             const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
             self.object_pool.items(.tag)[location] = .string;
-            const string_ptr = try allocator.alloc(u8, value.len);
-            self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
+            // const string_ptr = try allocator.alloc(u8, value.len);
+            // self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
+            self.object_pool.items(.data)[location].string_type.ptr = value.ptr;
             self.object_pool.items(.data)[location].string_type.len = value.len;
-            @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
+            // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
         },
         .null => unreachable,
         .boolean => unreachable,
     }
+    try self.free_list.ensureTotalCapacity(allocator, self.object_pool.len);
     return location;
 }
 
-pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) !void {
+pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void {
     std.debug.assert(position <= self.object_pool.len);
-
-    const should_add_to_freelist = self.free_possible_memory(allocator, position);
-    if (!should_add_to_freelist) {
+    if (position < 3) {
         return;
     }
+
+    _ = self.free_possible_memory(allocator, position);
     self.object_pool.items(.tag)[position] = .null;
     self.object_pool.items(.data)[position].integer = 0;
-    try self.free_list.append(allocator, position);
+    self.free_list.appendAssumeCapacity(position);
 }
 
 fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) bool {
@@ -168,7 +171,40 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
 }
 
 pub fn get(self: *ObjectPool, position: ObjectIndex) InternalObject {
+    std.debug.assert(position <= self.object_pool.len);
     return self.object_pool.get(position);
+}
+
+pub fn get_tag(self: *ObjectPool, position: ObjectIndex) ObjectTypes {
+    std.debug.assert(position <= self.object_pool.len);
+    return self.object_pool.items(.tag)[position];
+}
+
+pub fn get_data(self: *ObjectPool, position: ObjectIndex) InternalObject.ObjectData {
+    std.debug.assert(position <= self.object_pool.len);
+    return self.object_pool.items(.data)[position];
+}
+
+pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const u8 {
+    switch (self.get_tag(position)) {
+        .integer => return std.fmt.bufPrint(buffer, "{d}", .{self.get_data(position).integer}),
+        .boolean => if (position == 1) {
+            return std.fmt.bufPrint(buffer, "true", .{});
+        } else {
+            return std.fmt.bufPrint(buffer, "false", .{});
+        },
+        .string => {
+            const data = self.get_data(position).string_type;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .runtime_error => {
+            const data = self.get_data(position).runtime_error;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .null => return std.fmt.bufPrint(buffer, "null", .{}),
+        .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        inline else => return Error.NonStringifibaleObject,
+    }
 }
 
 pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
