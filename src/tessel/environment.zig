@@ -32,6 +32,7 @@ pub fn CreateEnclosed(allocator: Allocator, parent: *Environment) !*Environment 
     env.parent_env = parent;
     env.child_envs = .{};
     env.depth = parent.depth + 1;
+    parent.add_child(allocator, env);
     return env;
 }
 
@@ -40,10 +41,6 @@ pub fn add_child(self: *Environment, allocator: Allocator, child: *Environment) 
 }
 
 pub fn deinit(self: *Environment, allocator: Allocator) void {
-    var it = self.memory.valueIterator();
-    while (it.next()) |value_ptr| {
-        value_ptr.value.deinit(allocator);
-    }
     var kit = self.memory.keyIterator();
     while (kit.next()) |value_ptr| {
         allocator.free(value_ptr.*);
@@ -57,19 +54,18 @@ pub fn deinit(self: *Environment, allocator: Allocator) void {
     allocator.destroy(self);
 }
 
-pub fn get_object(self: *const Environment, key: []const u8, allocator: Allocator) !Object {
+pub fn get_object(self: *const Environment, key: []const u8) ObjectIndex {
     const output = self.memory.get(key);
     if (output) |o| {
-        const out = try o.value.copy(allocator);
-        return out;
+        return o.value;
     } else {
-        const env_to_check = self.parent_env orelse return .null;
-        return env_to_check.get_object(key, allocator);
+        const env_to_check = self.parent_env orelse return null_object;
+        return env_to_check.get_object(key);
     }
 }
 
 pub fn get_ident_tag(self: *const Environment, key: []const u8) ?StorageType.Tag {
-    const output = self.memory.get(key) orelse return null;
+    const output = self.memory.get(key) orelse return StorageType.Tag.does_not_exist;
     return output.tag;
 }
 
@@ -77,32 +73,29 @@ pub fn create_variable(
     self: *Environment,
     allocator: Allocator,
     key: []const u8,
-    value: Object,
+    value: ObjectIndex,
     tag: StorageType.Tag,
 ) Error!void {
-    // We create copies of the key and value so that if the source of the key or value
-    // are uninitialized the hashmap is not affected. This does mean that we need to clean these up on evn destruction.
+    // We create copies of the key so that if the source of the key
+    // is uninitialized the hashmap is not affected. This does mean that we need to clean these up on evn destruction.
     if (self.memory.contains(key)) {
         return Error.VariableAlreadyInitialised;
     }
 
-    const local_value = try value.copy(allocator);
     var local_key = std.ArrayList(u8).init(allocator);
     try local_key.appendSlice(key);
 
-    const storage = StorageType{ .tag = tag, .value = local_value };
+    const storage = StorageType{ .tag = tag, .value = value };
     try self.memory.put(allocator, try local_key.toOwnedSlice(), storage);
     local_key.deinit();
 }
 
-pub fn update_variable(self: *Environment, allocator: Allocator, key: []const u8, value: Object) Error!void {
+pub fn update_variable(self: *Environment, key: []const u8, value: ObjectIndex) Error!void {
     var value_ptr = self.memory.getPtr(key) orelse return Error.NonExistantVariable;
     if (value_ptr.tag == .constant) {
         return Error.ConstVariableModification;
     }
-    value_ptr.value.deinit(allocator);
-    const local_value = try value.copy(allocator);
-    value_ptr.value = local_value;
+    value_ptr.value = value;
 }
 
 pub fn print_env_hashmap_stderr(self: *Environment) void {
@@ -118,15 +111,17 @@ pub fn print_env_hashmap_stderr(self: *Environment) void {
 
 pub const StorageType = struct {
     tag: Tag,
-    value: Object,
+    value: ObjectIndex,
 
     pub const Tag = enum {
         constant,
         variable,
+        does_not_exist,
     };
 };
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const Object = @import("object.zig").Object;
+const ObjectIndex = @import("object.zig").ObjectIndex;
+const null_object = @import("object.zig").null_object;
