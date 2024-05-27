@@ -1,17 +1,20 @@
 pub const Evaluator = @This();
 
 object_pool: ObjectPool,
+identifier_map: IdentifierMap,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
 pub fn init(allocator: Allocator) !Evaluator {
     return Evaluator{
         .object_pool = try ObjectPool.init(allocator),
+        .identifier_map = IdentifierMap.init(),
     };
 }
 
 pub fn deinit(self: *Evaluator, allocator: Allocator) void {
     self.object_pool.deinit(allocator);
+    self.identifier_map.deinit(allocator);
 }
 
 pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: *Environment) Error!ObjectIndex {
@@ -126,7 +129,8 @@ fn eval_statement(
             }
 
             const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            _ = env.create_variable(allocator, get_token_literal(ast, ident_token), actual_pos, tag) catch |err| switch (err) {
+            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
+            _ = env.create_variable(allocator, hash, actual_pos, tag) catch |err| switch (err) {
                 Environment.Error.VariableAlreadyInitialised => {
                     const output = try std.fmt.allocPrint(
                         allocator,
@@ -162,7 +166,8 @@ fn eval_statement(
             }
 
             const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            const old_obj = env.update_variable(get_token_literal(ast, ident_token), actual_pos) catch |err| switch (err) {
+            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
+            const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
                 Environment.Error.NonExistantVariable => {
                     const output = try std.fmt.allocPrint(
                         allocator,
@@ -225,7 +230,8 @@ fn eval_expression(
         },
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
-            const value_pos = env.get_object(ident_name);
+            const hash = try self.identifier_map.create(allocator, ident_name);
+            const value_pos = env.get_object(hash);
             if (value_pos == null_object) {
                 const output = try std.fmt.allocPrint(
                     allocator,
@@ -421,7 +427,8 @@ fn get_function_body_env(
 
     for (func.function.parameters_ptr[0..func.function.parameters_len], 0..args.len) |param, arg| {
         const identifier = get_token_literal(ast, ast.nodes.items(.main_token)[param]);
-        env.create_variable(allocator, identifier, args[arg], .constant) catch |err| switch (err) {
+        const hash = try self.identifier_map.create(allocator, identifier);
+        env.create_variable(allocator, hash, args[arg], .constant) catch |err| switch (err) {
             Environment.Error.VariableAlreadyInitialised => {
                 return null;
             },
@@ -991,6 +998,22 @@ test "evaluate_function_expressions" {
             ,
             .output = "10",
         },
+        .{
+            .source =
+            \\  const a = 10;
+            \\  const fn_call = fn(x) {
+            \\      const b = fn(y) {
+            \\          a + x + y
+            \\      };
+            \\      return b;
+            \\  };
+            \\  const add_two = fn_call(2);
+            \\  const add_three = fn_call(3);
+            \\  add_three(3);
+            \\  add_three(7);
+            ,
+            .output = "20",
+        },
         .{ .source = "const add = fn(x, y) { return x + y; }; add( 5 * 5, add(5, 5))", .output = "35" },
         .{ .source = "const b = fn() { 10; }; const add = fn(a, b) { a() + b }; add(b, 10);", .output = "20" },
     };
@@ -1076,10 +1099,9 @@ const Environment = @import("environment.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
 const ObjectPool = @import("object.zig");
-// const Object = ObjectPool.Object;
-// const ObjectStructures = ObjectPool.ObjectStructures;
 const ObjectTypes = ObjectPool.ObjectTypes;
 const ObjectIndex = ObjectPool.ObjectIndex;
 const null_object = ObjectPool.null_object;
 const true_object = ObjectPool.true_object;
 const false_object = ObjectPool.false_object;
+const IdentifierMap = @import("identifier_map.zig");
