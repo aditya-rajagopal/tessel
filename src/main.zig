@@ -2,17 +2,9 @@ const std = @import("std");
 const repl = @import("repl/repl.zig");
 
 pub fn main() !void {
-    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // defer arena.deinit();
-    // const allocator = arena.allocator();
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer {
-        const deinit_status = gpa.deinit();
-        if (deinit_status == .leak) {
-            @panic("memory leak");
-        }
-    }
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
@@ -58,4 +50,3 @@ const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
 const object = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
-const IdentMap = @import("tessel/identifier_map.zig");
