@@ -5,11 +5,18 @@ identifier_map: IdentifierMap,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator) !Evaluator {
-    return Evaluator{
+pub fn init(allocator: Allocator, env: *Environment) !Evaluator {
+    var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
         .identifier_map = IdentifierMap.init(),
     };
+
+    inline for (std.meta.fields(Builtins)) |f| {
+        const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
+        const hash = try eval.identifier_map.create(allocator, f.name);
+        try env.create_variable(allocator, hash, position, .constant);
+    }
+    return eval;
 }
 
 pub fn deinit(self: *Evaluator, allocator: Allocator) void {
@@ -311,7 +318,7 @@ fn eval_function_call(
     }
     defer self.object_pool.free(allocator, function);
 
-    if (function_tag != .function_expression) {
+    if (function_tag != .function_expression and function_tag != .builtin) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Cannot call on type: {s}",
@@ -344,7 +351,16 @@ fn call_function(
     args: []const ObjectIndex,
     allocator: Allocator,
 ) Error!ObjectIndex {
+    const function_tag = self.object_pool.get_tag(func);
     const function_data = self.object_pool.get_data(func);
+    if (function_tag == .builtin) {
+        const out_data = function_data.builtin(self, &allocator, args.ptr, @as(u32, @intCast(args.len)));
+        defer allocator.free(args);
+        for (0..args.len) |i| {
+            defer self.object_pool.free(allocator, args[i]);
+        }
+        return out_data;
+    }
     const num_expected_params = function_data.function.parameters_len;
     if (num_expected_params != args.len) {
         const output = try std.fmt.allocPrint(
@@ -987,6 +1003,7 @@ test "evaluate_string_expressions" {
         .{ .source = "\"foobar\"", .output = "foobar" },
         .{ .source = "const a = \"foobar\"; a;", .output = "foobar" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .output = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .output = "foobar" },
         .{
             .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
             .output = "foobaz barbaz",
@@ -1004,6 +1021,19 @@ test "evaluate_string_expressions" {
             ,
             .output = "foobar",
         },
+    };
+
+    try eval_tests(&tests, false);
+}
+
+test "evaluate_builtin_len" {
+    const tests = [_]test_struct{
+        .{ .source = "len(\"\")", .output = "0" },
+        .{ .source = "len(\"test\")", .output = "4" },
+        .{ .source = "len(\"hello world!\")", .output = "12" },
+        .{ .source = "const a = \"test\";len(a)", .output = "4" },
+        .{ .source = "len(1)", .output = "Argument of type: INTEGER is not supported by builtin 'len'" },
+        .{ .source = "len(\"foo\", \"bar\")", .output = "Wrong number of arguments to builin function len. Expected 1 got 2" },
     };
 
     try eval_tests(&tests, false);
@@ -1140,7 +1170,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
             std.debug.print("Testing: Source: {s}\n", .{t.source});
         }
         var env = try Environment.Create(testing.allocator);
-        var eval = try Evaluator.init(testing.allocator);
+        var eval = try Evaluator.init(testing.allocator, env);
         defer eval.deinit(testing.allocator);
         defer env.deinit(testing.allocator);
         var ast = try Parser.parse_program(t.source, testing.allocator);
@@ -1170,3 +1200,4 @@ const null_object = ObjectPool.null_object;
 const true_object = ObjectPool.true_object;
 const false_object = ObjectPool.false_object;
 const IdentifierMap = @import("identifier_map.zig");
+const Builtins = @import("builtins.zig");

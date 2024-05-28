@@ -11,12 +11,14 @@ pub const null_object: ObjectIndex = 0;
 pub const true_object: ObjectIndex = 1;
 pub const false_object: ObjectIndex = 2;
 
+pub const reserved_objects: ObjectIndex = 3;
+
 pub fn init(allocator: Allocator) !ObjectPool {
     return initCapacity(allocator, 0);
 }
 
 pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
-    const internal_capacity = capacity + 3;
+    const internal_capacity = capacity + reserved_objects;
     var pool = ObjectPool{
         .object_pool = .{},
         .free_list = .{},
@@ -59,6 +61,19 @@ pub fn deinit(self: *ObjectPool, allocator: Allocator) void {
 pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *const anyopaque) !ObjectIndex {
     if (tag == .null) {
         return null_object;
+    }
+
+    if (tag == .builtin) {
+        const value: *const BuiltInFn = @ptrCast(@alignCast(data));
+        try self.object_pool.append(
+            allocator,
+            InternalObject{
+                .tag = tag,
+                .data = .{ .builtin = value.* },
+                .refs = 0,
+            },
+        );
+        return @as(u32, @intCast(self.object_pool.len - 1));
     }
 
     if (tag == .boolean) {
@@ -119,6 +134,7 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             self.object_pool.items(.data)[location].string_type.len = value.len;
             // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
         },
+        .builtin => unreachable,
         .null => unreachable,
         .boolean => unreachable,
     }
@@ -129,7 +145,10 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
 
 pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void {
     std.debug.assert(position <= self.object_pool.len);
-    if (position < 3) {
+    if (position < reserved_objects) {
+        return;
+    }
+    if (self.get_tag(position) == .builtin) {
         return;
     }
     if (self.object_pool.items(.refs)[position] == 0) {
@@ -171,6 +190,7 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
         },
         .null => return false,
         .boolean => return false,
+        .builtin => return false,
     }
     return true;
 }
@@ -192,7 +212,7 @@ pub fn get_data(self: *ObjectPool, position: ObjectIndex) InternalObject.ObjectD
 
 pub fn increase_ref(self: *ObjectPool, position: ObjectIndex) void {
     std.debug.assert(position <= self.object_pool.len);
-    if (position < 3) {
+    if (position < reserved_objects) {
         return;
     }
 
@@ -217,6 +237,7 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        .builtin => unreachable,
         .return_expression => unreachable,
     }
 }
@@ -232,8 +253,54 @@ pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
         .function_expression => "FUNCTION EXPRESSION",
         .runtime_error => "RUNTIME ERROR",
         .null => "NULL",
+        .builtin => "BUILTIN",
     };
 }
+
+pub fn print_object_pool_to_stderr(self: *ObjectPool) !void {
+    std.debug.print("Object pool: \n", .{});
+    var buffer: [1024]u8 = undefined;
+    for (0..self.object_pool.len) |i| {
+        const tag = self.get_tag(@as(u32, @intCast(i)));
+        const data = self.get_data(@as(u32, @intCast(i)));
+        std.debug.print("\tTag: {s}\t Value: ", .{@tagName(tag)});
+        var buf: []u8 = undefined;
+        switch (tag) {
+            .integer => buf = try std.fmt.bufPrint(&buffer, "{d}", .{data.integer}),
+            .boolean => if (i == 1) {
+                buf = try std.fmt.bufPrint(&buffer, "true", .{});
+            } else {
+                buf = try std.fmt.bufPrint(&buffer, "false", .{});
+            },
+            .string => {
+                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.string_type.ptr[0..data.string_type.len]});
+            },
+            .runtime_error => {
+                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.runtime_error.ptr[0..data.runtime_error.len]});
+            },
+            .null => buf = try std.fmt.bufPrint(&buffer, "null", .{}),
+            .function_expression => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.function}),
+            .builtin => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.builtin}),
+            .return_expression => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.return_value}),
+        }
+        std.debug.print("{s}\n", .{buf});
+    }
+}
+
+pub const BuiltInFn = *const fn (
+    *Evaluator,
+    *const Allocator,
+    [*]const ObjectIndex,
+    u32,
+    // [*]u8,
+    // u32,
+) callconv(.C) ObjectIndex;
+
+pub const BuiltinObject = extern struct {
+    tag: ObjectTypes,
+    data: InternalObject.ObjectData,
+};
+
 pub const InternalObject = struct {
     tag: ObjectTypes,
     data: ObjectData,
@@ -246,6 +313,7 @@ pub const InternalObject = struct {
         function: FunctionExpression,
         runtime_error: StringType,
         string_type: StringType,
+        builtin: BuiltInFn,
     };
 
     const FunctionExpression = extern struct {
@@ -268,13 +336,14 @@ pub const InternalObject = struct {
     };
 };
 
-pub const ObjectTypes = enum {
+pub const ObjectTypes = enum(u8) {
     integer,
     boolean,
     string,
     return_expression,
     function_expression,
     runtime_error,
+    builtin,
     null,
 };
 
@@ -293,7 +362,7 @@ test "test_object" {
 
     const integer: i64 = 32;
     const position = try pool.create(allocator, .integer, @ptrCast(&integer));
-    try testing.expectEqual(3, position);
+    try testing.expectEqual(reserved_objects, position);
     try testing.expectEqual(.integer, pool.get_tag(position));
     try testing.expectEqual(32, pool.get_data(position).integer);
     try testing.expectEqual(0, pool.free_list.items.len);
@@ -307,41 +376,41 @@ test "test_object" {
 
     const buf = try std.fmt.allocPrint(allocator, "This is a sample string {d}\n", .{integer});
     const str_pos = try pool.create(allocator, .string, @ptrCast(&buf));
-    try testing.expectEqual(4, str_pos);
+    try testing.expectEqual(reserved_objects + 1, str_pos);
     try testing.expectEqual(.string, pool.get_tag(str_pos));
     try testing.expectEqual(27, pool.get_data(str_pos).string_type.len);
     try testing.expectEqual(0, pool.free_list.items.len);
     const str = pool.get(str_pos).data.string_type;
     try testing.expectEqualSlices(u8, buf, str.ptr[0..str.len]);
-    try testing.expectEqual(5, pool.object_pool.len);
+    try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, str_pos);
     try testing.expectEqual(1, pool.free_list.items.len);
-    try testing.expectEqualSlices(u32, &[_]u32{4}, pool.free_list.items);
+    try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
     try testing.expectEqual(.null, pool.get_tag(str_pos));
 
     const err_buf = try std.fmt.allocPrint(allocator, "This is a sample Error {d}\n", .{integer});
     const err_pos = try pool.create(allocator, .runtime_error, @ptrCast(&err_buf));
-    try testing.expectEqual(4, err_pos);
+    try testing.expectEqual(reserved_objects + 1, err_pos);
     try testing.expectEqual(.runtime_error, pool.get_tag(err_pos));
     try testing.expectEqual(26, pool.get_data(err_pos).runtime_error.len);
     try testing.expectEqual(0, pool.free_list.items.len);
     const err = pool.get(err_pos).data.runtime_error;
     try testing.expectEqualSlices(u8, err_buf, err.ptr[0..err.len]);
-    try testing.expectEqual(5, pool.object_pool.len);
+    try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, err_pos);
     try testing.expectEqual(1, pool.free_list.items.len);
-    try testing.expectEqualSlices(u32, &[_]u32{4}, pool.free_list.items);
+    try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
     try testing.expectEqual(.null, pool.get_tag(err_pos));
 
     const return_expr = try pool.create(allocator, .return_expression, @ptrCast(&position));
-    try testing.expectEqual(4, return_expr);
+    try testing.expectEqual(reserved_objects + 1, return_expr);
     try testing.expectEqual(.return_expression, pool.get_tag(return_expr));
-    try testing.expectEqual(3, pool.get_data(return_expr).return_value);
+    try testing.expectEqual(reserved_objects, pool.get_data(return_expr).return_value);
     try testing.expectEqual(0, pool.free_list.items.len);
-    try testing.expectEqual(5, pool.object_pool.len);
+    try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, return_expr);
     try testing.expectEqual(1, pool.free_list.items.len);
-    try testing.expectEqualSlices(u32, &[_]u32{4}, pool.free_list.items);
+    try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
     try testing.expectEqual(.null, pool.get_tag(return_expr));
 
     var blocks = std.ArrayList(u32).init(allocator);
@@ -357,7 +426,7 @@ test "test_object" {
     };
     const func_loc = try pool.create(allocator, .function_expression, @ptrCast(&func_data));
 
-    try testing.expectEqual(4, func_loc);
+    try testing.expectEqual(reserved_objects + 1, func_loc);
     try testing.expectEqual(.function_expression, pool.get_tag(return_expr));
     const fdata = pool.get_data(func_loc).function;
     try testing.expectEqual(4, fdata.block_len);
@@ -365,10 +434,10 @@ test "test_object" {
     try testing.expectEqualSlices(u32, func_data.block, fdata.block_ptr[0..fdata.block_len]);
     try testing.expectEqualSlices(u32, func_data.parameters, fdata.parameters_ptr[0..fdata.parameters_len]);
     try testing.expectEqual(0, pool.free_list.items.len);
-    try testing.expectEqual(5, pool.object_pool.len);
+    try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, func_loc);
     try testing.expectEqual(1, pool.free_list.items.len);
-    try testing.expectEqualSlices(u32, &[_]u32{4}, pool.free_list.items);
+    try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
     try testing.expectEqual(.null, pool.get_tag(func_loc));
 }
 
@@ -379,3 +448,4 @@ const token = @import("token.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
 const Environment = @import("environment.zig");
+const Evaluator = @import("evaluator.zig");
