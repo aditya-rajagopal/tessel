@@ -361,6 +361,7 @@ fn call_function(
         }
         return out_data;
     }
+
     const num_expected_params = function_data.function.parameters_len;
     if (num_expected_params != args.len) {
         const output = try std.fmt.allocPrint(
@@ -608,6 +609,7 @@ fn eval_infix_operation(
 
     switch (left_tag) {
         .integer => return self.eval_intint_infix_operation(node, left, right, allocator),
+
         .string => return self.eval_string_infix_operation(ast, node, left, right, allocator),
         else => unreachable,
     }

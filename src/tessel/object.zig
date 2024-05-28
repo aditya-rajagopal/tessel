@@ -74,6 +74,7 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             },
         );
         return @as(u32, @intCast(self.object_pool.len - 1));
+
     }
 
     if (tag == .boolean) {
@@ -382,6 +383,7 @@ test "test_object" {
     try testing.expectEqual(0, pool.free_list.items.len);
     const str = pool.get(str_pos).data.string_type;
     try testing.expectEqualSlices(u8, buf, str.ptr[0..str.len]);
+
     try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, str_pos);
     try testing.expectEqual(1, pool.free_list.items.len);
@@ -390,12 +392,14 @@ test "test_object" {
 
     const err_buf = try std.fmt.allocPrint(allocator, "This is a sample Error {d}\n", .{integer});
     const err_pos = try pool.create(allocator, .runtime_error, @ptrCast(&err_buf));
+
     try testing.expectEqual(reserved_objects + 1, err_pos);
     try testing.expectEqual(.runtime_error, pool.get_tag(err_pos));
     try testing.expectEqual(26, pool.get_data(err_pos).runtime_error.len);
     try testing.expectEqual(0, pool.free_list.items.len);
     const err = pool.get(err_pos).data.runtime_error;
     try testing.expectEqualSlices(u8, err_buf, err.ptr[0..err.len]);
+
     try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, err_pos);
     try testing.expectEqual(1, pool.free_list.items.len);
@@ -411,6 +415,7 @@ test "test_object" {
     pool.free(allocator, return_expr);
     try testing.expectEqual(1, pool.free_list.items.len);
     try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
+
     try testing.expectEqual(.null, pool.get_tag(return_expr));
 
     var blocks = std.ArrayList(u32).init(allocator);
@@ -426,7 +431,9 @@ test "test_object" {
     };
     const func_loc = try pool.create(allocator, .function_expression, @ptrCast(&func_data));
 
+
     try testing.expectEqual(reserved_objects + 1, func_loc);
+
     try testing.expectEqual(.function_expression, pool.get_tag(return_expr));
     const fdata = pool.get_data(func_loc).function;
     try testing.expectEqual(4, fdata.block_len);
@@ -434,10 +441,12 @@ test "test_object" {
     try testing.expectEqualSlices(u32, func_data.block, fdata.block_ptr[0..fdata.block_len]);
     try testing.expectEqualSlices(u32, func_data.parameters, fdata.parameters_ptr[0..fdata.parameters_len]);
     try testing.expectEqual(0, pool.free_list.items.len);
+
     try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, func_loc);
     try testing.expectEqual(1, pool.free_list.items.len);
     try testing.expectEqualSlices(u32, &[_]u32{reserved_objects + 1}, pool.free_list.items);
+
     try testing.expectEqual(.null, pool.get_tag(func_loc));
 }
 
