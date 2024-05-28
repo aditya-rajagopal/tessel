@@ -23,8 +23,10 @@ pub fn start(allocator: Allocator) !void {
     var msg_buf: [10240]u8 = undefined;
     var env = try Environment.Create(allocator);
     defer env.deinit(allocator);
-    var eval = try Evaluator.init(allocator);
+
+    var eval = try Evaluator.init(allocator, env);
     defer eval.deinit(allocator);
+
     while (true) {
         try stdout.print("{s}", .{PROMT});
         try bw.flush();

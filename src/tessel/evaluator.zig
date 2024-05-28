@@ -5,11 +5,18 @@ identifier_map: IdentifierMap,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator) !Evaluator {
-    return Evaluator{
+pub fn init(allocator: Allocator, env: *Environment) !Evaluator {
+    var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
         .identifier_map = IdentifierMap.init(),
     };
+
+    inline for (std.meta.fields(Builtins)) |f| {
+        const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
+        const hash = try eval.identifier_map.create(allocator, f.name);
+        try env.create_variable(allocator, hash, position, .constant);
+    }
+    return eval;
 }
 
 pub fn deinit(self: *Evaluator, allocator: Allocator) void {
@@ -306,9 +313,12 @@ fn eval_function_call(
 ) Error!ObjectIndex {
     const function = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
     const function_tag = self.object_pool.get_tag(function);
+    if (function_tag == .runtime_error) {
+        return function;
+    }
     defer self.object_pool.free(allocator, function);
 
-    if (function_tag != .function_expression) {
+    if (function_tag != .function_expression and function_tag != .builtin) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Cannot call on type: {s}",
@@ -341,7 +351,17 @@ fn call_function(
     args: []const ObjectIndex,
     allocator: Allocator,
 ) Error!ObjectIndex {
+    const function_tag = self.object_pool.get_tag(func);
     const function_data = self.object_pool.get_data(func);
+    if (function_tag == .builtin) {
+        const out_data = function_data.builtin(self, &allocator, args.ptr, @as(u32, @intCast(args.len)));
+        defer allocator.free(args);
+        for (0..args.len) |i| {
+            defer self.object_pool.free(allocator, args[i]);
+        }
+        return out_data;
+    }
+
     const num_expected_params = function_data.function.parameters_len;
     if (num_expected_params != args.len) {
         const output = try std.fmt.allocPrint(
@@ -574,7 +594,7 @@ fn eval_infix_operation(
     const left_tag = self.object_pool.get_tag(left);
     const right_tag = self.object_pool.get_tag(right);
 
-    if (!(left_tag == .integer and right_tag == .integer)) { // or !(left_tag == .string and right_tag == .string)) {
+    if (!(left_tag == .integer and right_tag == .integer) and !(left_tag == .string and right_tag == .string)) {
         const outstr = try std.fmt.allocPrint(
             allocator,
             "Unknown Operation: <{s}> {s} <{s}>",
@@ -589,7 +609,43 @@ fn eval_infix_operation(
 
     switch (left_tag) {
         .integer => return self.eval_intint_infix_operation(node, left, right, allocator),
+
+        .string => return self.eval_string_infix_operation(ast, node, left, right, allocator),
         else => unreachable,
+    }
+}
+
+fn eval_string_infix_operation(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: *const Ast.Node,
+    left: ObjectIndex,
+    right: ObjectIndex,
+    allocator: Allocator,
+) Error!ObjectIndex {
+    const left_data = self.object_pool.get_data(left).string_type;
+    const right_data = self.object_pool.get_data(right).string_type;
+    switch (node.tag) {
+        .ADDITION => {
+            const outstr = try std.fmt.allocPrint(
+                allocator,
+                "{s}{s}",
+                .{ left_data.ptr[0..left_data.len], right_data.ptr[0..right_data.len] },
+            );
+            return self.object_pool.create(allocator, .string, @ptrCast(&outstr));
+        },
+        inline else => {
+            const outstr = try std.fmt.allocPrint(
+                allocator,
+                "Unknown Operation: <{s}> {s} <{s}>",
+                .{
+                    self.object_pool.get_tag_string(left),
+                    get_token_literal(ast, node.main_token),
+                    self.object_pool.get_tag_string(right),
+                },
+            );
+            return try self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+        },
     }
 }
 
@@ -943,7 +999,48 @@ test "evaluate_integer_expressions" {
 
     try eval_tests(&tests, false);
 }
-//
+
+test "evaluate_string_expressions" {
+    const tests = [_]test_struct{
+        .{ .source = "\"foobar\"", .output = "foobar" },
+        .{ .source = "const a = \"foobar\"; a;", .output = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .output = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .output = "foobar" },
+        .{
+            .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
+            .output = "foobaz barbaz",
+        },
+        .{
+            .source =
+            \\  const fn_call = fn(x) {
+            \\      const b = fn(y) {
+            \\          x + y
+            \\      };
+            \\      return b;
+            \\  };
+            \\  const add_foo = fn_call("foo");
+            \\  add_foo("bar");
+            ,
+            .output = "foobar",
+        },
+    };
+
+    try eval_tests(&tests, false);
+}
+
+test "evaluate_builtin_len" {
+    const tests = [_]test_struct{
+        .{ .source = "len(\"\")", .output = "0" },
+        .{ .source = "len(\"test\")", .output = "4" },
+        .{ .source = "len(\"hello world!\")", .output = "12" },
+        .{ .source = "const a = \"test\";len(a)", .output = "4" },
+        .{ .source = "len(1)", .output = "Argument of type: INTEGER is not supported by builtin 'len'" },
+        .{ .source = "len(\"foo\", \"bar\")", .output = "Wrong number of arguments to builin function len. Expected 1 got 2" },
+    };
+
+    try eval_tests(&tests, false);
+}
+
 test "evaluate_if_else_expressions" {
     const tests = [_]test_struct{
         .{ .source = "if (true) { 10 }", .output = "10" },
@@ -1075,7 +1172,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
             std.debug.print("Testing: Source: {s}\n", .{t.source});
         }
         var env = try Environment.Create(testing.allocator);
-        var eval = try Evaluator.init(testing.allocator);
+        var eval = try Evaluator.init(testing.allocator, env);
         defer eval.deinit(testing.allocator);
         defer env.deinit(testing.allocator);
         var ast = try Parser.parse_program(t.source, testing.allocator);
@@ -1105,3 +1202,4 @@ const null_object = ObjectPool.null_object;
 const true_object = ObjectPool.true_object;
 const false_object = ObjectPool.false_object;
 const IdentifierMap = @import("identifier_map.zig");
+const Builtins = @import("builtins.zig");

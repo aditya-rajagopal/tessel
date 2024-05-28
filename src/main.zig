@@ -29,7 +29,8 @@ pub fn main() !void {
 
     var env = try Environment.Create(allocator);
     defer env.deinit(allocator);
-    var eval = try Evaluator.init(allocator);
+
+    var eval = try Evaluator.init(allocator, env);
     defer eval.deinit(allocator);
 
     var ast = try Parser.parse_program(buffer[0..out :0], allocator);
