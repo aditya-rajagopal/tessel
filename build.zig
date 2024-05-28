@@ -13,12 +13,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const install = b.addInstallArtifact(exe, .{
-        .dest_dir = .{
-            .override = .{ .custom = "../" },
-        },
-        .pdb_dir = .{
-            .override = .{ .custom = "./bin" },
-        },
+        // .dest_dir = .{
+        //     .override = .{ .custom = "../" },
+        // },
+        // .pdb_dir = .{
+        //     .override = .{ .custom = "./bin" },
+        // },
     });
     b.default_step.dependOn(&install.step);
 
@@ -54,13 +54,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const loc = b.addInstallArtifact(exe, .{
-        .dest_dir = .{
-            .override = .{ .custom = "./" },
-        },
-        .pdb_dir = .{
-            .override = .{ .custom = "./bin" },
-        },
+    const loc = b.addInstallArtifact(bench, .{
+        // .dest_dir = .{
+        //     .override = .{ .custom = "./" },
+        // },
+        // .pdb_dir = .{
+        //     .override = .{ .custom = "./bin" },
+        // },
     });
     b.default_step.dependOn(&loc.step);
 

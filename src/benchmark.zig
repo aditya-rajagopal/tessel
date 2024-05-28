@@ -36,7 +36,7 @@ pub fn main() !void {
     var buffer: [1024]u8 = undefined;
     var timer = try std.time.Timer.start();
     var env = try Environment.Create(allocator);
-    var eval = try Evaluator.init(allocator);
+    var eval = try Evaluator.init(allocator, env);
     defer eval.deinit(allocator);
     defer env.deinit(allocator);
     var ast = try Parser.parse_program(tessel_fibonacci_35, allocator);
