@@ -1,19 +1,17 @@
 pub const Evaluator = @This();
 
 object_pool: ObjectPool,
-identifier_map: IdentifierMap,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator, env: *Environment) !Evaluator {
+pub fn init(allocator: Allocator, env: *Environment, map: *IdentifierMap) !Evaluator {
     var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
-        .identifier_map = IdentifierMap.init(),
     };
 
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
-        const hash = try eval.identifier_map.create(allocator, f.name);
+        const hash = try map.create(allocator, f.name);
         try env.create_variable(allocator, hash, position, .constant);
     }
     return eval;
@@ -21,7 +19,6 @@ pub fn init(allocator: Allocator, env: *Environment) !Evaluator {
 
 pub fn deinit(self: *Evaluator, allocator: Allocator) void {
     self.object_pool.deinit(allocator);
-    self.identifier_map.deinit(allocator);
 }
 
 pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: *Environment) Error!ObjectIndex {
@@ -135,14 +132,14 @@ fn eval_statement(
                 },
             }
 
-            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
-            _ = env.create_variable(allocator, hash, actual_pos, tag) catch |err| switch (err) {
+            const ident_node = ast.nodes.get(ast_node.node_data.lhs);
+
+            _ = env.create_variable(allocator, ident_node.node_data.lhs, actual_pos, tag) catch |err| switch (err) {
                 Environment.Error.VariableAlreadyInitialised => {
                     const output = try std.fmt.allocPrint(
                         allocator,
                         "Identifier \"{s}\" has already been initialised",
-                        .{get_token_literal(ast, ident_token)},
+                        .{get_token_literal(ast, ident_node.main_token)},
                     );
                     return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
@@ -172,14 +169,14 @@ fn eval_statement(
                 },
             }
 
-            const ident_token = ast.nodes.get(ast_node.node_data.lhs).main_token;
-            const hash = try self.identifier_map.create(allocator, get_token_literal(ast, ident_token));
+            const ident_node = ast.nodes.get(ast_node.node_data.lhs);
+            const hash = ident_node.node_data.lhs;
             const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
                 Environment.Error.NonExistantVariable => {
                     const output = try std.fmt.allocPrint(
                         allocator,
                         "Identifier \"{s}\" does not exist. Cannot assign anything to it.",
-                        .{get_token_literal(ast, ident_token)},
+                        .{get_token_literal(ast, ident_node.main_token)},
                     );
                     return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
@@ -187,7 +184,7 @@ fn eval_statement(
                     const output = try std.fmt.allocPrint(
                         allocator,
                         "Identifier \"{s}\" is declared as a constant and cannot be modified",
-                        .{get_token_literal(ast, ident_token)},
+                        .{get_token_literal(ast, ident_node.main_token)},
                     );
                     return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
                 },
@@ -243,7 +240,7 @@ fn eval_expression(
         },
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
-            const hash = try self.identifier_map.create(allocator, ident_name);
+            const hash = ast_node.node_data.lhs;
             const value_pos = env.get_object(hash);
             if (value_pos == null_object) {
                 const output = try std.fmt.allocPrint(
@@ -554,8 +551,7 @@ fn get_function_body_env(
     }
 
     for (func.function.parameters_ptr[0..func.function.parameters_len], 0..args.len) |param, arg| {
-        const identifier = get_token_literal(ast, ast.nodes.items(.main_token)[param]);
-        const hash = try self.identifier_map.create(allocator, identifier);
+        const hash = ast.nodes.items(.node_data)[param].lhs;
         env.create_variable(allocator, hash, args[arg], .constant) catch |err| switch (err) {
             Environment.Error.VariableAlreadyInitialised => {
                 return null;
@@ -1295,11 +1291,13 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         if (enable_debug_print) {
             std.debug.print("Testing: Source: {s}\n", .{t.source});
         }
+        var identifier_map = IdentifierMap.init();
+        defer identifier_map.deinit(testing.allocator);
         var env = try Environment.Create(testing.allocator);
-        var eval = try Evaluator.init(testing.allocator, env);
+        var eval = try Evaluator.init(testing.allocator, env, &identifier_map);
         defer eval.deinit(testing.allocator);
         defer env.deinit(testing.allocator);
-        var ast = try Parser.parse_program(t.source, testing.allocator);
+        var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
 
         const output = try eval.evaluate_program(&ast, testing.allocator, env);

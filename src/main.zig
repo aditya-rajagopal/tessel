@@ -27,13 +27,15 @@ pub fn main() !void {
     buffer[out] = 0;
     var timer = try std.time.Timer.start();
 
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(allocator);
     var env = try Environment.Create(allocator);
     defer env.deinit(allocator);
 
-    var eval = try Evaluator.init(allocator, env);
+    var eval = try Evaluator.init(allocator, env, &identifier_map);
     defer eval.deinit(allocator);
 
-    var ast = try Parser.parse_program(buffer[0..out :0], allocator);
+    var ast = try Parser.parse_program(buffer[0..out :0], allocator, &identifier_map);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -51,3 +53,4 @@ const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
 const object = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
+const IdentifierMap = @import("tessel/identifier_map.zig");

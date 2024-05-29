@@ -1,14 +1,14 @@
 pub const IdentifierMap = @This();
 
 map: std.StringHashMapUnmanaged(IdentifierIndex),
-current_max: u32,
+current_index: u32,
 
 pub const IdentifierIndex = u32;
 
 pub fn init() IdentifierMap {
     return IdentifierMap{
         .map = .{},
-        .current_max = 0,
+        .current_index = 0,
     };
 }
 
@@ -26,9 +26,21 @@ pub fn create(self: *IdentifierMap, allocator: Allocator, key: []const u8) !Iden
     } else {
         var local_key = std.ArrayList(u8).init(allocator);
         try local_key.appendSlice(key);
-        try self.map.put(allocator, try local_key.toOwnedSlice(), self.current_max);
-        self.current_max += 1;
-        return self.current_max - 1;
+        try self.map.put(allocator, try local_key.toOwnedSlice(), self.current_index);
+        self.current_index += 1;
+        return self.current_index - 1;
+    }
+}
+
+pub fn print_env_hashmap_stderr(self: *IdentifierMap) void {
+    var it = self.map.iterator();
+    std.debug.print("\n", .{});
+    std.debug.print("Environment Hash map: \n", .{});
+    while (it.next()) |value_ptr| {
+        std.debug.print(
+            "\tKey: \"{s}\"\t Value: {any}\n",
+            .{ value_ptr.key_ptr.*, value_ptr.value_ptr.* },
+        );
     }
 }
 

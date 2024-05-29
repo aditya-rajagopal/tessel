@@ -21,10 +21,14 @@ pub fn start(allocator: Allocator) !void {
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
+
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(allocator);
+
     var env = try Environment.Create(allocator);
     defer env.deinit(allocator);
 
-    var eval = try Evaluator.init(allocator, env);
+    var eval = try Evaluator.init(allocator, env, &identifier_map);
     defer eval.deinit(allocator);
 
     while (true) {
@@ -48,7 +52,7 @@ pub fn start(allocator: Allocator) !void {
             @memcpy(source_code, m.ptr);
             source_code[m.len] = 0;
 
-            var ast = try Parser.parse_program(source_code[0..m.len :0], allocator);
+            var ast = try Parser.parse_program(source_code[0..m.len :0], allocator, &identifier_map);
             defer ast.deinit(allocator);
 
             // var outlist = std.ArrayList(u8).init(allocator);
@@ -81,6 +85,7 @@ pub fn start(allocator: Allocator) !void {
             // try bw.flush();
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            // identifier_map.print_env_hashmap_stderr();
             const output = try eval.evaluate_program(&ast, allocator, env);
             defer eval.object_pool.free(allocator, output);
             const outstr = try eval.object_pool.ToString(&buffer, output);
@@ -109,3 +114,4 @@ const Parser = @import("../tessel/parser.zig");
 const Evaluator = @import("../tessel/evaluator.zig");
 const object = @import("../tessel/object.zig");
 const Environment = @import("../tessel/environment.zig");
+const IdentifierMap = @import("../tessel/identifier_map.zig");

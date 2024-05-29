@@ -4,6 +4,7 @@ pub const Parser = @This();
 source_buffer: [:0]const u8,
 /// The allocator to be used in all internal allocations
 allocator: std.mem.Allocator,
+map: *IdentifierMap,
 /// List of token types for each array. Seperated here for ease of access
 /// so that we dont have to get a Token struct out of a multiArray every time
 token_tags: []const token.TokenType,
@@ -43,7 +44,7 @@ pub const null_node: Ast.Node.NodeIndex = 0;
 
 pub const Error = error{ParsingError} || Allocator.Error;
 
-pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) !Ast {
+pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, map: *IdentifierMap) !Ast {
     std.debug.assert(source_buffer.len > 0);
 
     var tokens_local = Ast.TokenArrayType{};
@@ -62,6 +63,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator) 
     var parser = Parser{
         .source_buffer = source_buffer, //
         .allocator = allocator,
+        .map = map,
         .token_tags = tokens_local.items(.tag),
         .token_starts = tokens_local.items(.start),
         .token_ends = tokens_local.items(.end),
@@ -191,11 +193,13 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
             .rhs = 0,
         },
     });
+    const hash = try self.map.create(self.allocator, self.get_token_literal(ident_token));
+
     const ident_node = try self.add_node(.{
         .tag = .IDENTIFIER,
         .main_token = ident_token,
         .node_data = .{
-            .lhs = 0,
+            .lhs = hash,
             .rhs = 0,
         },
     });
@@ -215,11 +219,12 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
 
     // After a const or var statement you expect a identifier
     if (self.is_current_token(.IDENT)) {
+        const hash = try self.map.create(self.allocator, self.get_token_literal(self.token_current));
         self.nodes.items(.node_data)[node].lhs = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
-                .lhs = 0, //
+                .lhs = hash, //
                 .rhs = 0,
             },
         });
@@ -403,11 +408,17 @@ fn parse_expect_prefix_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 
 fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
     switch (self.token_tags[self.token_current]) {
-        .IDENT => return self.add_node(.{
-            .tag = .IDENTIFIER, //
-            .main_token = self.next_token(),
-            .node_data = .{ .lhs = 0, .rhs = 0 },
-        }),
+        .IDENT => {
+            const hash = try self.map.create(self.allocator, self.get_token_literal(self.token_current));
+            return self.add_node(.{
+                .tag = .IDENTIFIER, //
+                .main_token = self.next_token(),
+                .node_data = .{
+                    .lhs = hash,
+                    .rhs = 0,
+                },
+            });
+        },
         .INT => {
             const location = self.register_integer_literal() catch |err| switch (err) {
                 std.fmt.ParseIntError.Overflow => @panic("Unable to parse Integer Literal! Something has gone terribly wrong\n"),
@@ -534,11 +545,12 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
     const start_pos = @as(u32, @intCast(self.nodes.len));
     while (true) {
         const next_tok = try self.expect_token(.IDENT);
+        const hash = try self.map.create(self.allocator, self.get_token_literal(next_tok));
         _ = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = next_tok,
             .node_data = .{
-                .lhs = 0, //
+                .lhs = hash, //
                 .rhs = 0,
             },
         });
@@ -779,6 +791,12 @@ fn is_next_token(self: *Parser, tag: token.TokenType) bool {
     return self.token_current < self.token_ends.len - 1 and self.token_tags[self.token_current + 1] == tag;
 }
 
+fn get_token_literal(self: *Parser, tok_loc: Ast.TokenArrayIndex) []const u8 {
+    const tok_start = self.token_starts[tok_loc];
+    const tok_end = self.token_ends[tok_loc];
+    return self.source_buffer[tok_start..tok_end];
+}
+
 fn print_last_error(self: *Parser) void {
     const len = self.errors.items.len;
     if (len > 0) {
@@ -828,7 +846,9 @@ pub fn print_parser_errors_to_stderr(ast: *const Ast) !void {
 test "parser_initialization_test_only_root_node" {
     const input = "\n";
 
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     try testing.expectEqual(ast.nodes.len, 1);
@@ -843,7 +863,9 @@ test "parser_test_var_decl" {
         \\ const c = false;
     ;
 
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -885,7 +907,7 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 6,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -903,7 +925,7 @@ test "parser_test_var_decl" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 2,
             .expectedDataRHS = 0,
         },
         .{
@@ -927,7 +949,9 @@ test "parse_test_var_decl_errors" {
         \\ const b = ;
     ;
 
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
     try testing.expectEqual(ast.errors.len, 3);
 
@@ -976,7 +1000,9 @@ test "parser_test_return_stmt" {
         \\ return a;
     ;
 
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1040,7 +1066,9 @@ test "parser_test_assignement_stmt" {
         \\ b = fn(c) { c }
     ;
 
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1070,7 +1098,7 @@ test "parser_test_assignement_stmt" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 4,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1088,7 +1116,7 @@ test "parser_test_assignement_stmt" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1112,7 +1140,9 @@ test "parser_test_assignement_stmt" {
 }
 test "parser_test_identifer" {
     const input = "foobar;";
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1149,7 +1179,10 @@ test "parser_test_identifer" {
 
 test "parser_test_int_literal" {
     const input = "15;";
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1189,7 +1222,9 @@ test "parser_test_prefix_operators" {
         \\!15;
         \\-25;
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1353,7 +1388,9 @@ test "parser_test_infix_operators" {
     };
     for (tests, 0..) |t, i| {
         _ = i;
-        var ast = try Parser.parse_program(t.input, testing.allocator);
+        var identifier_map = IdentifierMap.init();
+        defer identifier_map.deinit(testing.allocator);
+        var ast = try Parser.parse_program(t.input, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
         var outlist = std.ArrayList(u8).init(testing.allocator);
         defer outlist.deinit();
@@ -1375,7 +1412,9 @@ test "parser_test_if_else_block" {
         \\      var b = 15;
         \\ };
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -1412,7 +1451,7 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1430,7 +1469,7 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1454,7 +1493,7 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 19,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1489,7 +1528,9 @@ test "parser_test_naked_if" {
         \\      var b = 10;
         \\ };
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -1526,7 +1567,7 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 7,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1544,7 +1585,7 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1578,7 +1619,9 @@ test "parser_array_expression" {
     const input =
         \\[1 , "two", three][1 * 2]
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1661,7 +1704,9 @@ test "parser_test_function_expression" {
         \\    return a + b;
         \\ }
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1691,7 +1736,7 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 4,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1715,7 +1760,7 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 10,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1751,7 +1796,9 @@ test "parser_test_function_empty_param" {
         \\    return 10;
         \\ }
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1809,7 +1856,9 @@ test "parser_test_function_call_expr" {
     const input =
         \\ a(1, 2, b(3, 4));
     ;
-    var ast = try Parser.parse_program(input, testing.allocator);
+    var identifier_map = IdentifierMap.init();
+    defer identifier_map.deinit(testing.allocator);
+    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1851,7 +1900,7 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 6,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1929,3 +1978,4 @@ const Ast = @import("ast.zig");
 const token = @import("token.zig");
 const Allocator = std.mem.Allocator;
 const convert_ast_to_string = @import("evaluator.zig").convert_ast_to_string;
+const IdentifierMap = @import("identifier_map.zig");
