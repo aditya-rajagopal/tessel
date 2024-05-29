@@ -48,6 +48,8 @@ pub const TokenType = enum {
     TRUE,
     FALSE,
     WHILE,
+    BREAK,
+    CONTINUE,
 };
 
 /// Map of all valid keywords in tessel created at compiletime
@@ -61,6 +63,8 @@ pub const Keywords = std.ComptimeStringMap(TokenType, .{
     .{ "true", .TRUE },
     .{ "false", .FALSE },
     .{ "while", .WHILE },
+    .{ "break", .BREAK },
+    .{ "continue", .CONTINUE },
 });
 
 /// Storage structure for tokens

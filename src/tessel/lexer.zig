@@ -301,6 +301,8 @@ test "test_lexing" {
         \\ [1, "two", three, 4]
         \\ while (true) {
         \\   i = i + 1;
+        \\   break;
+        \\   continue;
         \\ }
     ;
 
@@ -407,6 +409,10 @@ test "test_lexing" {
         .{ .expectedType = .IDENT, .expectedLiteral = "i" },
         .{ .expectedType = .PLUS, .expectedLiteral = "+" },
         .{ .expectedType = .INT, .expectedLiteral = "1" },
+        .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
+        .{ .expectedType = .BREAK, .expectedLiteral = "break" },
+        .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
+        .{ .expectedType = .CONTINUE, .expectedLiteral = "continue" },
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
         .{ .expectedType = .RBRACE, .expectedLiteral = "}" },
         .{ .expectedType = .EOF, .expectedLiteral = "" },

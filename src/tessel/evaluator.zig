@@ -1,5 +1,8 @@
 pub const Evaluator = @This();
 
+// TODO: REPL needs to be fixed. The Asts of subsequent lines cannot call functions as the blocks reference nodes that
+// do not exist anymore.
+
 object_pool: ObjectPool,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
@@ -47,6 +50,15 @@ fn evaluate_program_statements(
             .runtime_error => {
                 return obj_pos;
             },
+            .break_statement, .continue_statement => {
+                self.object_pool.free(allocator, obj_pos);
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Illegal break or continue statement",
+                    .{},
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            },
             else => {},
         }
 
@@ -64,6 +76,7 @@ fn evaluate_block(
     statemnts: []u32,
     allocator: Allocator,
     env: *Environment,
+    allow_break_continue: bool,
 ) Error!ObjectIndex {
     for (statemnts, 0..) |s, i| {
         const obj_pos = try self.eval_statement(ast, s, allocator, env);
@@ -71,6 +84,19 @@ fn evaluate_block(
         switch (self.object_pool.get_tag(obj_pos)) {
             .return_expression, .runtime_error => {
                 return obj_pos;
+            },
+            .break_statement, .continue_statement => {
+                if (allow_break_continue) {
+                    return obj_pos;
+                } else {
+                    self.object_pool.free(allocator, obj_pos);
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Illegal break or continue statement",
+                        .{},
+                    );
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+                }
             },
             else => {},
         }
@@ -108,95 +134,198 @@ fn eval_statement(
             const return_pos = self.object_pool.create(allocator, .return_expression, @ptrCast(&value));
             return return_pos;
         },
-        .VAR_STATEMENT => {
-            const value_pos = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            const value_tag = self.object_pool.get_tag(value_pos);
-            if (value_tag == .runtime_error) {
-                return value_pos;
-            }
-
-            const var_tag = get_token_literal(ast, ast_node.main_token);
-            var tag: Environment.StorageType.Tag = .constant;
-            if (std.mem.eql(u8, var_tag, "var")) {
-                tag = .variable;
-            }
-
-            var actual_pos: ObjectIndex = undefined;
-            switch (value_tag) {
-                .return_expression => {
-                    actual_pos = self.object_pool.get_data(value_pos).return_value;
-                    self.object_pool.free(allocator, value_pos);
-                },
-                else => {
-                    actual_pos = value_pos;
-                },
-            }
-
-            const ident_node = ast.nodes.get(ast_node.node_data.lhs);
-
-            _ = env.create_variable(allocator, ident_node.node_data.lhs, actual_pos, tag) catch |err| switch (err) {
-                Environment.Error.VariableAlreadyInitialised => {
-                    const output = try std.fmt.allocPrint(
-                        allocator,
-                        "Identifier \"{s}\" has already been initialised",
-                        .{get_token_literal(ast, ident_node.main_token)},
-                    );
-                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
-                },
-                Environment.Error.NonExistantVariable => unreachable,
-                Environment.Error.ConstVariableModification => unreachable,
-                Environment.Error.ExceedingMaxDepth => unreachable,
-                else => |overflow| return overflow,
-            };
-            self.object_pool.increase_ref(actual_pos);
-            return null_object;
+        .VAR_STATEMENT => return self.eval_var_decl(ast, ast_node, allocator, env),
+        .ASSIGNMENT_STATEMENT => return self.eval_var_assign(ast, ast_node, allocator, env),
+        .BREAK_STATEMENT => return break_object,
+        .CONTINUE_STATEMENT => return continue_object,
+        .WHILE_LOOP => return self.eval_while_loop(ast, ast_node, allocator, env),
+        else => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "FATAL: Something has gone horribly wrong. Unknown statement of type {s}.",
+                .{@tagName(ast_node.tag)},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
         },
-        .ASSIGNMENT_STATEMENT => {
-            const value_pos = try self.eval_expression(ast, ast_node.node_data.rhs, allocator, env);
-            const value_tag = self.object_pool.get_tag(value_pos);
-            if (value_tag == .runtime_error) {
-                return value_pos;
-            }
+    }
+}
 
-            var actual_pos: ObjectIndex = undefined;
-            switch (value_tag) {
-                .return_expression => {
-                    actual_pos = self.object_pool.get_data(value_pos).return_value;
-                    self.object_pool.free(allocator, value_pos);
-                },
-                else => {
-                    actual_pos = value_pos;
-                },
-            }
+fn eval_var_decl(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const value_pos = try self.eval_expression(ast, node.node_data.rhs, allocator, env);
+    const value_tag = self.object_pool.get_tag(value_pos);
+    if (value_pos == break_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Illegal break. Cannot create variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (value_pos == continue_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Illegal continue. Cannot create variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (value_pos == null_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Expression returns nothing. Cannot store nothing into a variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (value_tag == .runtime_error) {
+        return value_pos;
+    }
 
-            const ident_node = ast.nodes.get(ast_node.node_data.lhs);
-            const hash = ident_node.node_data.lhs;
-            const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
-                Environment.Error.NonExistantVariable => {
-                    const output = try std.fmt.allocPrint(
-                        allocator,
-                        "Identifier \"{s}\" does not exist. Cannot assign anything to it.",
-                        .{get_token_literal(ast, ident_node.main_token)},
-                    );
-                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
-                },
-                Environment.Error.ConstVariableModification => {
-                    const output = try std.fmt.allocPrint(
-                        allocator,
-                        "Identifier \"{s}\" is declared as a constant and cannot be modified",
-                        .{get_token_literal(ast, ident_node.main_token)},
-                    );
-                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
-                },
-                Environment.Error.VariableAlreadyInitialised => unreachable,
-                Environment.Error.ExceedingMaxDepth => unreachable,
-                else => |overflow| return overflow,
-            };
-            self.object_pool.free(allocator, old_obj);
+    const var_tag = get_token_literal(ast, node.main_token);
+    var tag: Environment.StorageType.Tag = .constant;
+    if (std.mem.eql(u8, var_tag, "var")) {
+        tag = .variable;
+    }
 
-            return null_object;
+    var actual_pos: ObjectIndex = undefined;
+    switch (value_tag) {
+        .return_expression => {
+            actual_pos = self.object_pool.get_data(value_pos).return_value;
+            self.object_pool.free(allocator, value_pos);
         },
-        else => unreachable,
+        else => {
+            actual_pos = value_pos;
+        },
+    }
+
+    const ident_node = ast.nodes.get(node.node_data.lhs);
+
+    _ = env.create_variable(allocator, ident_node.node_data.lhs, actual_pos, tag) catch |err| switch (err) {
+        Environment.Error.VariableAlreadyInitialised => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Identifier \"{s}\" has already been initialised",
+                .{get_token_literal(ast, ident_node.main_token)},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        },
+        Environment.Error.NonExistantVariable => unreachable,
+        Environment.Error.ConstVariableModification => unreachable,
+        Environment.Error.ExceedingMaxDepth => unreachable,
+        else => |overflow| return overflow,
+    };
+    self.object_pool.increase_ref(actual_pos);
+    return null_object;
+}
+
+fn eval_var_assign(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const value_pos = try self.eval_expression(ast, node.node_data.rhs, allocator, env);
+    const value_tag = self.object_pool.get_tag(value_pos);
+    if (value_tag == .runtime_error) {
+        return value_pos;
+    }
+    if (value_pos == break_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Illegal break. Cannot store this variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (value_pos == continue_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Illegal continue. Cannot store this into variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (value_pos == null_object) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Expression returns nothing. Cannot store nothing into a variable",
+            .{},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+
+    var actual_pos: ObjectIndex = undefined;
+    switch (value_tag) {
+        .return_expression => {
+            actual_pos = self.object_pool.get_data(value_pos).return_value;
+            self.object_pool.free(allocator, value_pos);
+        },
+        else => {
+            actual_pos = value_pos;
+        },
+    }
+
+    const ident_node = ast.nodes.get(node.node_data.lhs);
+    const hash = ident_node.node_data.lhs;
+    const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
+        Environment.Error.NonExistantVariable => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Identifier \"{s}\" does not exist. Cannot assign anything to it.",
+                .{get_token_literal(ast, ident_node.main_token)},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        },
+        Environment.Error.ConstVariableModification => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Identifier \"{s}\" is declared as a constant and cannot be modified",
+                .{get_token_literal(ast, ident_node.main_token)},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        },
+        Environment.Error.VariableAlreadyInitialised => unreachable,
+        Environment.Error.ExceedingMaxDepth => unreachable,
+        else => |overflow| return overflow,
+    };
+    self.object_pool.free(allocator, old_obj);
+
+    return null_object;
+}
+
+fn eval_while_loop(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    while (true) {
+        const truth = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
+        if (truth == true_object) {
+            const block_node_tag = ast.nodes.items(.tag)[node.node_data.rhs];
+            std.debug.assert(block_node_tag == .BLOCK);
+            const block_node_data = ast.nodes.items(.node_data)[node.node_data.rhs];
+            const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+            const result = try self.evaluate_block(ast, statements, allocator, env, true);
+            const result_tag = self.object_pool.get_tag(result);
+            if (result_tag == .runtime_error) {
+                return result;
+            }
+            if (result_tag == .break_statement) {
+                return null_object;
+            }
+            continue;
+        } else {
+            return null_object;
+        }
     }
 }
 
@@ -509,6 +638,7 @@ fn call_function(
         function_data.function.block_ptr[0..function_data.function.block_len],
         allocator,
         function_body_env,
+        false,
     );
     const out_type = self.object_pool.get_tag(out);
     const out_data = self.object_pool.get_data(out);
@@ -549,10 +679,10 @@ fn get_function_body_env(
     if (func.function.parameters_len == 0) {
         return env;
     }
+    _ = ast;
 
     for (func.function.parameters_ptr[0..func.function.parameters_len], 0..args.len) |param, arg| {
-        const hash = ast.nodes.items(.node_data)[param].lhs;
-        env.create_variable(allocator, hash, args[arg], .constant) catch |err| switch (err) {
+        env.create_variable(allocator, param, args[arg], .constant) catch |err| switch (err) {
             Environment.Error.VariableAlreadyInitialised => {
                 return null;
             },
@@ -604,7 +734,8 @@ fn eval_function_expression(
         const num_nodes = parameters_node.node_data.rhs - parameters_node.node_data.lhs;
         try parameters.ensureUnusedCapacity(num_nodes);
         for (parameters_node.node_data.lhs..parameters_node.node_data.rhs) |i| {
-            try parameters.append(@as(u32, @intCast(i)));
+            const hash = ast.nodes.get(i).node_data.lhs;
+            try parameters.append(@as(u32, @intCast(hash)));
         }
     }
 
@@ -827,7 +958,7 @@ fn eval_if_expression(
                 std.debug.assert(block_node_tag == .BLOCK);
                 const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
                 const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-                return self.evaluate_block(ast, statements, allocator, env);
+                return self.evaluate_block(ast, statements, allocator, env, true);
             } else {
                 return null_object;
             }
@@ -845,7 +976,7 @@ fn eval_if_expression(
                 block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             }
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            return self.evaluate_block(ast, statements, allocator, env);
+            return self.evaluate_block(ast, statements, allocator, env, true);
         },
         inline else => unreachable,
     }
@@ -1190,6 +1321,35 @@ test "evaluate_return_statements" {
     try eval_tests(&tests, false);
 }
 
+test "evaluate_while_loops" {
+    const tests = [_]test_struct{
+        // .{ .source = "while (false) { 10; }", .output = "null" },
+        // .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .output = "10" },
+        .{
+            .source =
+            \\  const fn_call = fn(x) {
+            \\      const b = fn(y) {
+            \\          var a = y;
+            \\          while (a < x ) {
+            \\              a = a + 1;
+            \\              if ( a >= 10 ) {
+            \\                  break;
+            \\              }
+            \\          }
+            \\          return a;
+            \\      };
+            \\      return b;
+            \\  };
+            \\  const t = fn_call(20);
+            \\  t(10);
+            ,
+            .output = "11",
+        },
+    };
+
+    try eval_tests(&tests, false);
+}
+
 test "evaluate_function_expressions" {
     const tests = [_]test_struct{
         .{ .source = "const a = fn(x, y) { x + y};", .output = "null" },
@@ -1305,6 +1465,22 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         const outstr = try eval.object_pool.ToString(&buffer, output);
         if (enable_debug_print) {
             std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });
+            try Parser.print_parser_errors_to_stderr(&ast);
+            identifier_map.print_env_hashmap_stderr();
+            env.print_env_hashmap_stderr();
+            try eval.object_pool.print_object_pool_to_stderr();
+            for (0..ast.nodes.len) |i| {
+                const n = ast.nodes.get(i);
+                std.debug.print("Nodes({d}): {any}\r\n", .{ i, n });
+            }
+
+            std.debug.print("Extra Data: ", .{});
+            for (0..ast.extra_data.len) |i| {
+                const n = ast.extra_data[i];
+                std.debug.print("{}, ", .{n});
+            }
+
+            std.debug.print("\n", .{});
         }
         try testing.expectEqualSlices(u8, t.output, outstr);
     }
@@ -1323,5 +1499,7 @@ const ObjectIndex = ObjectPool.ObjectIndex;
 const null_object = ObjectPool.null_object;
 const true_object = ObjectPool.true_object;
 const false_object = ObjectPool.false_object;
+const break_object = ObjectPool.break_object;
+const continue_object = ObjectPool.continue_object;
 const IdentifierMap = @import("identifier_map.zig");
 const Builtins = @import("builtins.zig");

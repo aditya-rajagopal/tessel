@@ -10,8 +10,10 @@ pub const ObjectIndex = u32;
 pub const null_object: ObjectIndex = 0;
 pub const true_object: ObjectIndex = 1;
 pub const false_object: ObjectIndex = 2;
+pub const break_object: ObjectIndex = 3;
+pub const continue_object: ObjectIndex = 4;
 
-pub const reserved_objects: ObjectIndex = 3;
+pub const reserved_objects: ObjectIndex = 5;
 
 pub fn init(allocator: Allocator) !ObjectPool {
     return initCapacity(allocator, 0);
@@ -47,6 +49,10 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
     const false_loc = pool.free_list.popOrNull() orelse unreachable;
     pool.object_pool.items(.tag)[false_loc] = .boolean;
     pool.object_pool.items(.data)[false_loc].boolean = false;
+    const break_loc = pool.free_list.popOrNull() orelse unreachable;
+    pool.object_pool.items(.tag)[break_loc] = .break_statement;
+    const continue_loc = pool.free_list.popOrNull() orelse unreachable;
+    pool.object_pool.items(.tag)[continue_loc] = .continue_statement;
     return pool;
 }
 
@@ -74,6 +80,13 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             },
         );
         return @as(u32, @intCast(self.object_pool.len - 1));
+    }
+
+    if (tag == .break_statement) {
+        return break_object;
+    }
+    if (tag == .continue_statement) {
+        return continue_object;
     }
 
     if (tag == .boolean) {
@@ -144,6 +157,8 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
         .builtin => unreachable,
         .null => unreachable,
         .boolean => unreachable,
+        .break_statement => unreachable,
+        .continue_statement => unreachable,
     }
     self.object_pool.items(.refs)[location] = 0;
     try self.free_list.ensureTotalCapacity(allocator, self.object_pool.len);
@@ -205,6 +220,8 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
         },
         .null => return false,
         .boolean => return false,
+        .break_statement => return false,
+        .continue_statement => return false,
         .builtin => return false,
     }
     return true;
@@ -268,6 +285,8 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
         },
         .builtin => unreachable,
         .return_expression => unreachable,
+        .break_statement => return std.fmt.bufPrint(buffer, "break", .{}),
+        .continue_statement => return std.fmt.bufPrint(buffer, "continue", .{}),
     }
 }
 
@@ -284,6 +303,8 @@ pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
         .array => "ARRAY",
         .null => "NULL",
         .builtin => "BUILTIN",
+        .break_statement => "BREAK",
+        .continue_statement => "CONTINUE",
     };
 }
 
@@ -293,7 +314,7 @@ pub fn print_object_pool_to_stderr(self: *ObjectPool) !void {
     for (0..self.object_pool.len) |i| {
         const tag = self.get_tag(@as(u32, @intCast(i)));
         const data = self.get_data(@as(u32, @intCast(i)));
-        std.debug.print("\tTag: {s}\t Value: ", .{@tagName(tag)});
+        std.debug.print("Pos: {d} \tTag: {s}\t Value: ", .{ i, @tagName(tag) });
         var buf: []u8 = undefined;
         switch (tag) {
             .integer => buf = try std.fmt.bufPrint(&buffer, "{d}", .{data.integer}),
@@ -309,9 +330,18 @@ pub fn print_object_pool_to_stderr(self: *ObjectPool) !void {
                 buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.runtime_error.ptr[0..data.runtime_error.len]});
             },
             .null => buf = try std.fmt.bufPrint(&buffer, "null", .{}),
-            .function_expression => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.function}),
+            .function_expression => buf = try std.fmt.bufPrint(&buffer, "Function@{d}", .{i}),
             .builtin => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.builtin}),
             .return_expression => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.return_value}),
+            .break_statement => buf = try std.fmt.bufPrint(&buffer, "break", .{}),
+            .continue_statement => buf = try std.fmt.bufPrint(&buffer, "continue", .{}),
+            .array => {
+                std.debug.print("[", .{});
+                for (data.array.items) |pos| {
+                    std.debug.print("{s}, ", .{try self.ToString(&buffer, pos)});
+                }
+                std.debug.print("]", .{});
+            },
         }
         std.debug.print("{s}\n", .{buf});
     }
@@ -377,6 +407,8 @@ pub const ObjectTypes = enum(u8) {
     string,
     array,
     return_expression,
+    break_statement,
+    continue_statement,
     function_expression,
     runtime_error,
     builtin,

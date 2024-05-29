@@ -67,6 +67,14 @@ pub const Node = struct {
         /// lhs = expression start node;
         /// rhs = 0;
         EXPRESSION_STATEMENT,
+        /// Break statemnt
+        /// breaks out a loop block
+        /// main_token = break
+        BREAK_STATEMENT,
+        /// continue statemnt
+        /// continue to the next loop iteration
+        /// main_token = continue
+        CONTINUE_STATEMENT,
         /// Indicates a block of statments
         /// The statments are stored in teh extra_data array
         /// lhs = starting point in the extra_data array
@@ -181,6 +189,7 @@ pub const Error = struct {
         expected_identifier_after_const, //
         expected_assignent_after_var_decl,
         expected_expression,
+        illegal_break_or_continue,
         expected_token,
         expected_closing_rparen,
         expected_prefix_expression,

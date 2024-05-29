@@ -142,7 +142,30 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
                 else => |overflow| return overflow,
             };
         },
-        .WHILE => {},
+        .WHILE => {
+            return self.parse_while_loop() catch |err| switch (err) {
+                Error.ParsingError => return null_node,
+                else => |overflow| return overflow,
+            };
+        },
+        .BREAK => {
+            const break_token = self.next_token();
+            _ = self.eat_token(.SEMICOLON);
+            return self.add_node(.{
+                .tag = .BREAK_STATEMENT, //
+                .main_token = break_token,
+                .node_data = .{ .lhs = 0, .rhs = 0 },
+            });
+        },
+        .CONTINUE => {
+            const cont_token = self.next_token();
+            _ = self.eat_token(.SEMICOLON);
+            return self.add_node(.{
+                .tag = .CONTINUE_STATEMENT, //
+                .main_token = cont_token,
+                .node_data = .{ .lhs = 0, .rhs = 0 },
+            });
+        },
         else => {
             if (self.is_current_token(.IDENT)) {
                 return try self.maybe_parse_assign_statement();
@@ -152,6 +175,21 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
         },
     }
     return null_node;
+}
+
+fn parse_while_loop(self: *Parser) Error!Ast.Node.NodeIndex {
+    const while_node = try self.add_node(.{
+        .tag = .WHILE_LOOP, //
+        .main_token = self.next_token(),
+        .node_data = .{ .lhs = 0, .rhs = 0 },
+    });
+    _ = try self.expect_token(.LPAREN);
+    const condition = try self.parse_expect_expression();
+    _ = try self.expect_token(.RPAREN);
+    const block = try self.parse_block(true);
+    self.nodes.items(.node_data)[while_node].lhs = condition;
+    self.nodes.items(.node_data)[while_node].rhs = block;
+    return while_node;
 }
 
 fn parse_expression_statement(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -194,7 +232,6 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
         },
     });
     const hash = try self.map.create(self.allocator, self.get_token_literal(ident_token));
-
     const ident_node = try self.add_node(.{
         .tag = .IDENTIFIER,
         .main_token = ident_token,
@@ -220,7 +257,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
     // After a const or var statement you expect a identifier
     if (self.is_current_token(.IDENT)) {
         const hash = try self.map.create(self.allocator, self.get_token_literal(self.token_current));
-        self.nodes.items(.node_data)[node].lhs = try self.add_node(.{
+        const ident = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
@@ -228,6 +265,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
                 .rhs = 0,
             },
         });
+        self.nodes.items(.node_data)[node].lhs = ident;
     } else {
         try self.add_error(.{
             .tag = .expected_identifier_after_const, //
@@ -525,7 +563,7 @@ fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     const parameters = try self.parse_function_parameters(func_token);
     _ = try self.expect_token(.RPAREN);
 
-    const func_block = try self.parse_block();
+    const func_block = try self.parse_block(false);
 
     return self.add_node(.{
         .tag = .FUNCTION_EXPRESSION, //
@@ -581,7 +619,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     }
     _ = try self.expect_token(.RPAREN);
 
-    const if_block = try self.parse_block();
+    const if_block = try self.parse_block(true);
     if (!self.is_current_token(.ELSE)) {
         return self.add_node(.{
             .tag = .NAKED_IF,
@@ -594,7 +632,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     }
     _ = try self.expect_token(.ELSE);
 
-    const else_block = try self.parse_block();
+    const else_block = try self.parse_block(true);
     const block_storage_start = self.extra_data.items.len;
     try self.extra_data.append(self.allocator, if_block);
     try self.extra_data.append(self.allocator, else_block);
@@ -608,7 +646,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     });
 }
 
-fn parse_block(self: *Parser) Error!Ast.Node.NodeIndex {
+fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeIndex {
     const left_brace = try self.expect_token(.LBRACE);
 
     const scratch_top = self.scratch_pad.items.len;
@@ -618,6 +656,14 @@ fn parse_block(self: *Parser) Error!Ast.Node.NodeIndex {
     while (true) {
         if (self.is_current_token(.RBRACE)) {
             break;
+        }
+        if ((self.is_current_token(.BREAK) or self.is_current_token(.CONTINUE)) and !allow_break_continue) {
+            try self.add_error(.{
+                .tag = .illegal_break_or_continue, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            return Error.ParsingError;
         }
         const statement = try self.parse_statement();
         if (statement == 0) {
