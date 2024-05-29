@@ -490,7 +490,7 @@ test "test_object" {
     var params = std.ArrayList(u32).init(allocator);
     try params.appendSlice(&[_]u32{ 1, 2 });
     const env = try Environment.Create(allocator);
-    defer env.deinit(allocator);
+    defer env.deinit(allocator, &pool);
     const func_data = InternalObject.FunctionData{
         .block = try blocks.toOwnedSlice(),
         .parameters = try params.toOwnedSlice(),

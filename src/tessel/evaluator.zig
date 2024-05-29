@@ -1501,13 +1501,14 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         defer identifier_map.deinit(testing.allocator);
         var env = try Environment.Create(testing.allocator);
         var eval = try Evaluator.init(testing.allocator, env, &identifier_map);
-        defer env.deinit(testing.allocator, &eval.object_pool);
-        defer eval.deinit(testing.allocator);
+        defer {
+            env.deinit(testing.allocator, &eval.object_pool);
+            eval.deinit(testing.allocator);
+        }
         var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
 
         const output = try eval.evaluate_program(&ast, testing.allocator, env);
-        defer eval.object_pool.free(testing.allocator, output);
         const outstr = try eval.object_pool.ToString(&buffer, output);
         if (enable_debug_print) {
             std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });
@@ -1529,6 +1530,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
             std.debug.print("\n", .{});
         }
         try testing.expectEqualSlices(u8, t.output, outstr);
+        eval.object_pool.free(testing.allocator, output);
     }
 }
 

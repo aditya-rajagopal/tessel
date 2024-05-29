@@ -1,5 +1,7 @@
 pub const Environment = @This();
 
+// TODO: Create an environment pool
+
 memory: std.AutoHashMapUnmanaged(IdentifierIndex, StorageType),
 parent_env: ?*Environment,
 child_envs: std.ArrayListUnmanaged(*Environment),
@@ -124,8 +126,10 @@ pub const StorageType = struct {
 
 test "environment" {
     const allocator = testing.allocator;
+    var pool = try ObjectPool.init(testing.allocator);
+    defer pool.deinit(testing.allocator);
     var env = try Environment.Create(allocator);
-    defer env.deinit(allocator);
+    defer env.deinit(allocator, &pool);
     const enclosedEnv = try Environment.CreateEnclosed(allocator, env);
     try env.add_child(allocator, enclosedEnv);
     try env.create_variable(allocator, 0, 1, .constant);
