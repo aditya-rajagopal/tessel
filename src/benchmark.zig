@@ -39,8 +39,6 @@ pub fn main() !void {
     defer identifier_map.deinit(allocator);
     var env = try Environment.Create(allocator);
     var eval = try Evaluator.init(allocator, env, &identifier_map);
-    defer eval.deinit(allocator);
-    defer env.deinit(allocator);
     std.debug.print("Object Pool Capacity start {d}\n", .{eval.object_pool.object_pool.capacity});
     var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &identifier_map);
     defer ast.deinit(allocator);
@@ -48,11 +46,15 @@ pub fn main() !void {
     try Parser.print_parser_errors_to_stderr(&ast);
     const output = try eval.evaluate_program(&ast, allocator, env);
 
-    defer eval.object_pool.free(allocator, output);
     const outstr = try eval.object_pool.ToString(&buffer, output);
     const end_time = timer.read();
     std.debug.print("Object Pool Capacity End {d}\n", .{eval.object_pool.object_pool.capacity});
-    std.debug.print("Fibonacci in Tessel: result: {s} time: {d}", .{ outstr, std.fmt.fmtDuration(end_time) });
+    // env.print_env_hashmap_stderr();
+    // try eval.object_pool.print_object_pool_to_stderr();
+    std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ outstr, std.fmt.fmtDuration(end_time) });
+    eval.object_pool.free(allocator, output);
+    env.deinit(allocator, &eval.object_pool);
+    eval.deinit(allocator);
 }
 
 const lexer = @import("tessel/lexer.zig");

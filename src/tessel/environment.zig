@@ -39,11 +39,16 @@ pub fn add_child(self: *Environment, allocator: Allocator, child: *Environment) 
     try self.child_envs.append(allocator, child);
 }
 
-pub fn deinit(self: *Environment, allocator: Allocator) void {
+pub fn deinit(self: *Environment, allocator: Allocator, object_pool: *ObjectPool) void {
     for (self.child_envs.items) |i| {
-        i.deinit(allocator);
+        i.deinit(allocator, object_pool);
     }
     self.child_envs.deinit(allocator);
+
+    var kit = self.memory.valueIterator();
+    while (kit.next()) |value_ptr| {
+        object_pool.free(allocator, value_ptr.value);
+    }
 
     self.memory.deinit(allocator);
     allocator.destroy(self);
@@ -149,5 +154,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const ObjectIndex = @import("object.zig").ObjectIndex;
+const ObjectPool = @import("object.zig");
 const null_object = @import("object.zig").null_object;
 const IdentifierIndex = @import("identifier_map.zig").IdentifierIndex;

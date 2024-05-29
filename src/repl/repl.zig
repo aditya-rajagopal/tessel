@@ -32,9 +32,8 @@ pub fn start() !void {
     defer identifier_map.deinit(allocator);
 
     var env = try Environment.Create(allocator);
-    defer env.deinit(allocator);
-
     var eval = try Evaluator.init(allocator, env, &identifier_map);
+    defer env.deinit(allocator, &eval.object_pool);
     defer eval.deinit(allocator);
 
     while (true) {
@@ -93,7 +92,6 @@ pub fn start() !void {
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
             // identifier_map.print_env_hashmap_stderr();
             const output = try eval.evaluate_program(&ast, allocator, env);
-            defer eval.object_pool.free(allocator, output);
             const outstr = try eval.object_pool.ToString(&buffer, output);
             const tag = eval.object_pool.get_tag(output);
             switch (tag) {
@@ -101,8 +99,11 @@ pub fn start() !void {
                 else => try stdout.print("Output >> {s}\n", .{outstr}),
             }
             try bw.flush();
+            eval.object_pool.free(allocator, output);
         }
     }
+    env.deinit(allocator, &eval.object_pool);
+    eval.deinit(allocator);
 }
 
 fn print_header(stdout: anytype) !void {

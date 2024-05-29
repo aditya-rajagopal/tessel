@@ -682,7 +682,7 @@ fn call_function(
                     return out_data.return_value;
                 },
                 else => {
-                    defer function_body_env.deinit(allocator);
+                    defer function_body_env.deinit(allocator, &self.object_pool);
                     return out_data.return_value;
                 },
             }
@@ -692,7 +692,7 @@ fn call_function(
             return out;
         },
         else => {
-            defer function_body_env.deinit(allocator);
+            defer function_body_env.deinit(allocator, &self.object_pool);
             return out;
         },
     }
@@ -853,13 +853,12 @@ fn eval_infix_operation(
     right: ObjectIndex,
     allocator: Allocator,
 ) Error!ObjectIndex {
-    defer self.object_pool.free(allocator, left);
-    defer self.object_pool.free(allocator, right);
-
     const left_tag = self.object_pool.get_tag(left);
     const right_tag = self.object_pool.get_tag(right);
 
     if (!(left_tag == .integer and right_tag == .integer) and !(left_tag == .string and right_tag == .string)) {
+        defer self.object_pool.free(allocator, left);
+        defer self.object_pool.free(allocator, right);
         const outstr = try std.fmt.allocPrint(
             allocator,
             "Unknown Operation: <{s}> {s} <{s}>",
@@ -888,6 +887,8 @@ fn eval_string_infix_operation(
     right: ObjectIndex,
     allocator: Allocator,
 ) Error!ObjectIndex {
+    defer self.object_pool.free(allocator, left);
+    defer self.object_pool.free(allocator, right);
     const left_data = self.object_pool.get_data(left).string_type;
     const right_data = self.object_pool.get_data(right).string_type;
     switch (node.tag) {
@@ -921,6 +922,8 @@ fn eval_intint_infix_operation(
     right: ObjectIndex,
     allocator: Allocator,
 ) Error!ObjectIndex {
+    defer self.object_pool.free(allocator, left);
+    defer self.object_pool.free(allocator, right);
     const left_data = self.object_pool.get_data(left);
     const right_data = self.object_pool.get_data(right);
     var result: bool = false;
@@ -939,22 +942,35 @@ fn eval_intint_infix_operation(
         },
         .ADDITION => {
             const res: i64 = left_data.integer + right_data.integer;
+            // self.object_pool.object_pool.items(.data)[left].integer = res;
+            // self.object_pool.increase_ref(left);
+            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .SUBTRACTION => {
             const res: i64 = left_data.integer - right_data.integer;
+            // self.object_pool.object_pool.items(.data)[left].integer = res;
+            // self.object_pool.increase_ref(left);
+            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .MULTIPLY => {
             const res: i64 = left_data.integer * right_data.integer;
+            // self.object_pool.object_pool.items(.data)[left].integer = res;
+            // self.object_pool.increase_ref(left);
+            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .DIVIDE => {
             const res: i64 = @divFloor(left_data.integer, right_data.integer);
+            // self.object_pool.object_pool.items(.data)[left].integer = res;
+            // self.object_pool.increase_ref(left);
+            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         inline else => unreachable,
     }
+    // defer self.object_pool.free(allocator, left);
     if (result) {
         return true_object;
     } else {
@@ -1485,8 +1501,8 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         defer identifier_map.deinit(testing.allocator);
         var env = try Environment.Create(testing.allocator);
         var eval = try Evaluator.init(testing.allocator, env, &identifier_map);
+        defer env.deinit(testing.allocator, &eval.object_pool);
         defer eval.deinit(testing.allocator);
-        defer env.deinit(testing.allocator);
         var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
 

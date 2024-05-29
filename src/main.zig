@@ -30,10 +30,8 @@ pub fn main() !void {
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
     var env = try Environment.Create(allocator);
-    defer env.deinit(allocator);
 
     var eval = try Evaluator.init(allocator, env, &identifier_map);
-    defer eval.deinit(allocator);
 
     var ast = try Parser.parse_program(buffer[0..out :0], allocator, &identifier_map);
     defer ast.deinit(allocator);
@@ -41,11 +39,13 @@ pub fn main() !void {
     try Parser.print_parser_errors_to_stderr(&ast);
     const output = try eval.evaluate_program(&ast, allocator, env);
 
-    defer eval.object_pool.free(allocator, output);
     const outstr = try eval.object_pool.ToString(&out_buffer, output);
     const end_time = timer.read();
     std.debug.print("{s}\n", .{outstr});
     std.debug.print("Program runtime: {d}\n", .{std.fmt.fmtDuration(end_time)});
+    eval.object_pool.free(allocator, output);
+    env.deinit(allocator, &eval.object_pool);
+    eval.deinit(allocator);
 }
 
 const lexer = @import("tessel/lexer.zig");
