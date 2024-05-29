@@ -28,6 +28,10 @@ fn len(
             const str_len: i64 = @as(i64, @intCast(arg_data.string_type.len));
             return self.object_pool.create(allocator.*, .integer, @ptrCast(&str_len)) catch unreachable;
         },
+        .array => {
+            const array_len: i64 = @as(i64, @intCast(arg_data.array.items.len));
+            return self.object_pool.create(allocator.*, .integer, @ptrCast(&array_len)) catch unreachable;
+        },
         else => {
             const output = std.fmt.allocPrint(
                 allocator.*,

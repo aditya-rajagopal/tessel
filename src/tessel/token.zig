@@ -35,6 +35,8 @@ pub const TokenType = enum {
     RPAREN,
     LBRACE,
     RBRACE,
+    LBRACKET,
+    RBRACKET,
 
     // Keywords
     FUNCTION,
@@ -45,6 +47,7 @@ pub const TokenType = enum {
     RETURN,
     TRUE,
     FALSE,
+    WHILE,
 };
 
 /// Map of all valid keywords in tessel created at compiletime
@@ -57,6 +60,7 @@ pub const Keywords = std.ComptimeStringMap(TokenType, .{
     .{ "return", .RETURN },
     .{ "true", .TRUE },
     .{ "false", .FALSE },
+    .{ "while", .WHILE },
 });
 
 /// Storage structure for tokens

@@ -83,6 +83,10 @@ pub const Node = struct {
         /// main_token is the location of the litera
         /// lhs = start of the string in sourc rhs = end of string
         STRING_LITERAL,
+        /// main_token = [
+        /// lhs = start in the extra data array of the expressions that make up the array
+        /// rhs = end in the extra data array of the expressions that make up the array
+        ARRAY_LITERAL,
         /// ! lhs. rhs is empty.
         BOOL_NOT,
         /// - lhs. rhs is empty
@@ -117,6 +121,11 @@ pub const Node = struct {
         /// extra_data[rhs] => if block
         /// extra_data[rhs+1] => else block node
         IF_ELSE,
+        /// While loop
+        /// main_token = while
+        /// lhs = condition expression
+        /// rhs = block to execute if lhs is true and then loop back to lhs condition
+        WHILE_LOOP,
         /// fn <FUNCTION_PARAMETER_BLOCK> <FUNCTION_BLOCK>
         /// function expression main_token = fn
         /// lhs = <FUNCTION_PARAMETER_BLOCK>
@@ -134,6 +143,11 @@ pub const Node = struct {
         /// rhs = location in extra_datas array
         /// the argument expressions nodes are in extra_data[rhs..rhs+2]
         FUNCTION_CALL,
+        /// Index into an array literal/variable
+        /// main_token = [
+        /// lhs = expression/identifier/literal that returns an array
+        /// rhs = expression that evaluates to the index.
+        ARRAY_INDEX,
 
         pub fn get_operator_string(tag: Tag) []const u8 {
             switch (tag) {

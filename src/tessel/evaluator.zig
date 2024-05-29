@@ -235,6 +235,12 @@ fn eval_expression(
         .BOOLEAN_LITERAL => {
             obj = if (ast_node.node_data.lhs == 1) true_object else false_object;
         },
+        .ARRAY_LITERAL => {
+            obj = try self.eval_array_literal(ast, ast_node, allocator, env);
+        },
+        .ARRAY_INDEX => {
+            obj = try self.eval_array_index(ast, ast_node, allocator, env);
+        },
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
             const hash = try self.identifier_map.create(allocator, ident_name);
@@ -297,11 +303,109 @@ fn eval_expression(
             obj = try self.eval_function_call(ast, ast_node, allocator, env);
         },
         else => {
-            return null_object;
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Expected an expression but got {s}",
+                .{@tagName(ast_node.tag)},
+            );
+            obj = try self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
         },
     }
 
     return obj;
+}
+
+fn eval_array_index(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const array = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
+    const array_tag = self.object_pool.get_tag(array);
+    if (array_tag == .runtime_error) {
+        return array;
+    }
+
+    defer self.object_pool.free(allocator, array);
+
+    if (array_tag != .array) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Cannot Index into type: {s}",
+            .{self.object_pool.get_tag_string(array)},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    const index = try self.eval_expression(ast, node.node_data.rhs, allocator, env);
+    const index_tag = self.object_pool.get_tag(index);
+
+    if (index_tag == .runtime_error) {
+        return array;
+    }
+
+    defer self.object_pool.free(allocator, index);
+
+    if (index_tag != .integer) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Cannot Index into an array with index of type: {s}",
+            .{self.object_pool.get_tag_string(index)},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    const index_value = self.object_pool.get_data(index).integer;
+    const array_data = self.object_pool.get_data(array).array;
+    const len = @as(i64, @intCast(array_data.items.len));
+    if (index_value >= len or index_value < -(len - 1)) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Index out of bounds for array with length: {d}. Got {d}",
+            .{ len, index_value },
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+
+    var return_object: ObjectIndex = null_object;
+    if (index_value >= 0) {
+        const i = @as(usize, @intCast(index_value));
+        return_object = array_data.items[i];
+    } else {
+        const i = @as(usize, @intCast(len + index_value));
+        return_object = array_data.items[i];
+    }
+    self.object_pool.increase_ref(return_object);
+
+    return return_object;
+}
+
+fn eval_array_literal(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: *Environment,
+) Error!ObjectIndex {
+    const elements = try self.eval_expression_list(ast, node.node_data.lhs, node.node_data.rhs, allocator, env);
+    defer allocator.free(elements);
+    if (elements.len >= 1) {
+        const possible_err_tag = self.object_pool.get_tag(elements[elements.len - 1]);
+        if (possible_err_tag == .runtime_error) {
+            defer allocator.free(elements);
+            if (elements.len > 1) {
+                for (0..elements.len - 1) |i| {
+                    self.object_pool.free(allocator, elements[i]);
+                }
+            }
+            return elements[elements.len - 1];
+        }
+    }
+    const ArrayData = ObjectPool.InternalObject.ArrayType{
+        .data = elements,
+    };
+
+    return self.object_pool.create(allocator, .array, @ptrCast(&ArrayData));
 }
 
 fn eval_function_call(
@@ -327,7 +431,11 @@ fn eval_function_call(
         return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
 
-    const arguments = try self.eval_function_arguments(ast, node.node_data.rhs, allocator, env);
+    const expression_range = if (node.node_data.rhs != 0)
+        ast.extra_data[node.node_data.rhs .. node.node_data.rhs + 2]
+    else
+        &[_]u32{ 0, 0 };
+    const arguments = try self.eval_expression_list(ast, expression_range[0], expression_range[1], allocator, env);
     if (arguments.len >= 1) {
         const possible_err_tag = self.object_pool.get_tag(arguments[arguments.len - 1]);
         if (possible_err_tag == .runtime_error) {
@@ -461,20 +569,20 @@ fn get_function_body_env(
     return env;
 }
 
-fn eval_function_arguments(
+fn eval_expression_list(
     self: *Evaluator,
     ast: *const Ast,
-    expression_location: Ast.Node.NodeIndex,
+    expression_start: Ast.Node.NodeIndex,
+    expression_end: Ast.Node.NodeIndex,
     allocator: Allocator,
     env: *Environment,
 ) ![]ObjectIndex {
     var arguments = std.ArrayList(ObjectIndex).init(allocator);
     defer arguments.deinit();
-    if (expression_location == 0) {
+    if (expression_end == 0) {
         return arguments.toOwnedSlice();
     }
-    const expression_range = ast.extra_data[expression_location .. expression_location + 2];
-    const expressions = ast.extra_data[expression_range[0]..expression_range[1]];
+    const expressions = ast.extra_data[expression_start..expression_end];
     for (expressions) |e| {
         const obj_pos = try self.eval_expression(ast, e, allocator, env);
         try arguments.append(obj_pos);
@@ -1033,6 +1141,8 @@ test "evaluate_builtin_len" {
         .{ .source = "len(\"\")", .output = "0" },
         .{ .source = "len(\"test\")", .output = "4" },
         .{ .source = "len(\"hello world!\")", .output = "12" },
+        .{ .source = "len([1, 2, 3])", .output = "3" },
+        .{ .source = "const a = [1, 2, 3]; len(a);", .output = "3" },
         .{ .source = "const a = \"test\";len(a)", .output = "4" },
         .{ .source = "len(1)", .output = "Argument of type: INTEGER is not supported by builtin 'len'" },
         .{ .source = "len(\"foo\", \"bar\")", .output = "Wrong number of arguments to builin function len. Expected 1 got 2" },
@@ -1052,6 +1162,20 @@ test "evaluate_if_else_expressions" {
         .{ .source = "if (1 < 2) { 10 } else { 20 }", .output = "10" },
         .{ .source = "if (1 < 2) { if(1 < 2) { return 10; } return 1; } else { 20 }", .output = "10" },
         .{ .source = "if (1 < 2) { if ( 3 < 2 ) { 30 } else{ if (1 < 2 * 5 + 3) { 10 } }} else { 20 }", .output = "10" },
+    };
+
+    try eval_tests(&tests, false);
+}
+
+test "evaluate_arrays" {
+    const tests = [_]test_struct{
+        .{ .source = "[1, 2, 3]", .output = "[1, 2, 3, ]" },
+        .{ .source = "[1, 2, 3]", .output = "[1, 2, 3, ]" },
+        .{ .source = "[1, 2, 3][0]", .output = "1" },
+        .{ .source = "[1, \"two\", 3][1]", .output = "two" },
+        .{ .source = "const a = [1, 2, 3]; a;", .output = "[1, 2, 3, ]" },
+        .{ .source = "const a = [1, 2, 3]; a[-1];", .output = "3" },
+        .{ .source = "const last = fn(x) { return x[-1] }; last([1, 2, 3]);", .output = "3" },
     };
 
     try eval_tests(&tests, false);

@@ -140,6 +140,7 @@ fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
                 else => |overflow| return overflow,
             };
         },
+        .WHILE => {},
         else => {
             if (self.is_current_token(.IDENT)) {
                 return try self.maybe_parse_assign_statement();
@@ -296,6 +297,7 @@ const OperatorHierarchy = std.enums.directEnumArrayDefault(token.TokenType, Oper
     // Functions are of the form .IDENT(.ARGUMENTS. So we can treat ( as an infix operator and declare it
     // a function call. In no other instance can you have an expression followed by a (.
     .LPAREN = .{ .precedence = 110, .tag = .FUNCTION_CALL },
+    .LBRACKET = .{ .precedence = 110, .tag = .ARRAY_INDEX },
 });
 
 fn parse_expect_expression(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -337,6 +339,10 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
 
         if (self.token_tags[operator_token] == .LPAREN) {
             cur_node = try self.parse_function_call(cur_node, operator_token);
+            continue;
+        }
+        if (self.token_tags[operator_token] == .LBRACKET) {
+            cur_node = try self.parse_array_index(cur_node, operator_token);
             continue;
         }
 
@@ -442,6 +448,7 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
             _ = try self.expect_token(.RPAREN);
             return node;
         },
+        .LBRACKET => return self.parse_array_literal(),
         .IF => return self.parse_if_expression(),
         .FUNCTION => return self.parse_function_expression(),
         else => {
@@ -454,6 +461,49 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
             return Error.ParsingError;
         },
     }
+}
+
+fn parse_array_literal(self: *Parser) Error!Ast.Node.NodeIndex {
+    std.debug.assert(self.is_current_token(.LBRACKET));
+    const array_literal_token = self.next_token();
+    if (self.is_current_token(.RBRACKET)) {
+        _ = self.eat_token(.RBRACKET);
+        return self.add_node(.{
+            .tag = .ARRAY_LITERAL,
+            .main_token = array_literal_token,
+            .node_data = .{
+                .lhs = 0,
+                .rhs = 0,
+            },
+        });
+    }
+
+    const scratch_top = self.scratch_pad.items.len;
+    defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
+    while (true) {
+        const arg = try self.parse_expect_expression();
+        if (arg == 0) {
+            try self.add_error(.{
+                .tag = .expected_expression, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            continue;
+        }
+        try self.scratch_pad.append(self.allocator, arg);
+        if (self.is_current_token(.RBRACKET)) break;
+        _ = try self.expect_token(.COMMA);
+    }
+    const extra_data_locs = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
+    _ = self.eat_token(.RBRACKET);
+    return self.add_node(.{
+        .tag = .ARRAY_LITERAL, //
+        .main_token = array_literal_token,
+        .node_data = .{
+            .lhs = extra_data_locs.start, //
+            .rhs = extra_data_locs.end,
+        },
+    });
 }
 
 fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -575,12 +625,41 @@ fn parse_block(self: *Parser) Error!Ast.Node.NodeIndex {
     });
 }
 
-fn parse_function_call(self: *Parser, function_name: Ast.Node.NodeIndex, op: Ast.Node.NodeIndex) Error!Ast.Node.NodeIndex {
+fn parse_array_index(
+    self: *Parser,
+    array_literal: Ast.Node.NodeIndex,
+    operator: Ast.Node.NodeIndex,
+) Error!Ast.Node.NodeIndex {
+    const index = try self.parse_expect_expression();
+    if (index == 0) {
+        try self.add_error(.{
+            .tag = .expected_expression, //
+            .token = self.token_current,
+            .expected = .ILLEGAL,
+        });
+        return null_node;
+    }
+    _ = try self.expect_token(.RBRACKET);
+    return self.add_node(.{
+        .tag = .ARRAY_INDEX, //
+        .main_token = operator,
+        .node_data = .{
+            .lhs = array_literal, //
+            .rhs = index,
+        },
+    });
+}
+
+fn parse_function_call(
+    self: *Parser,
+    function_name: Ast.Node.NodeIndex,
+    operator: Ast.Node.NodeIndex,
+) Error!Ast.Node.NodeIndex {
     if (self.is_current_token(.RPAREN)) {
         _ = self.eat_token(.RPAREN);
         return self.add_node(.{
             .tag = .FUNCTION_CALL, //
-            .main_token = op,
+            .main_token = operator,
             .node_data = .{
                 .lhs = function_name, //
                 .rhs = 0,
@@ -618,7 +697,7 @@ fn parse_function_call(self: *Parser, function_name: Ast.Node.NodeIndex, op: Ast
     _ = self.eat_token(.RPAREN);
     return self.add_node(.{
         .tag = .FUNCTION_CALL, //
-        .main_token = op,
+        .main_token = operator,
         .node_data = .{
             .lhs = function_name, //
             .rhs = extra_data_locs.end,
@@ -1495,6 +1574,87 @@ test "parser_test_naked_if" {
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
+test "parser_array_expression" {
+    const input =
+        \\[1 , "two", three][1 * 2]
+    ;
+    var ast = try Parser.parse_program(input, testing.allocator);
+    defer ast.deinit(testing.allocator);
+
+    const tests = [_]struct {
+        expectedNodeType: Ast.Node.Tag, //
+        expectedMainToken: Ast.TokenArrayIndex,
+        expectedDataLHS: Ast.Node.NodeIndex,
+        expectedDataRHS: Ast.Node.NodeIndex,
+    }{
+        .{
+            .expectedNodeType = .ROOT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 9,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .STRING_LITERAL, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = 9,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .ARRAY_LITERAL, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 3,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 8,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .MULTIPLY, //
+            .expectedMainToken = 9,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = 7,
+        },
+        .{
+            .expectedNodeType = .ARRAY_INDEX, //
+            .expectedMainToken = 7,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 8,
+        },
+    };
+
+    const test_extra_data = [_]u32{ 2, 3, 4, 1 };
+
+    const int_literals = [_]i64{ 1, 1, 2 };
+
+    try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
+}
 test "parser_test_function_expression" {
     const input =
         \\ fn(a, b) {

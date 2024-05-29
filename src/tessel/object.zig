@@ -74,7 +74,6 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             },
         );
         return @as(u32, @intCast(self.object_pool.len - 1));
-
     }
 
     if (tag == .boolean) {
@@ -135,6 +134,13 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             self.object_pool.items(.data)[location].string_type.len = value.len;
             // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
         },
+        .array => {
+            const value: *const InternalObject.ArrayType = @ptrCast(@alignCast(data));
+            self.object_pool.items(.tag)[location] = .array;
+            self.object_pool.items(.data)[location].array = try allocator.create(std.ArrayListUnmanaged(ObjectIndex));
+            self.object_pool.items(.data)[location].array.* = .{};
+            try self.object_pool.items(.data)[location].array.appendSlice(allocator, value.data);
+        },
         .builtin => unreachable,
         .null => unreachable,
         .boolean => unreachable,
@@ -189,6 +195,14 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
             );
             self.object_pool.items(.data)[position].string_type.len = 0;
         },
+        .array => {
+            const ptr = self.object_pool.items(.data)[position].array;
+            for (ptr.items) |pos| {
+                self.free(allocator, pos);
+            }
+            ptr.deinit(allocator);
+            allocator.destroy(ptr);
+        },
         .null => return false,
         .boolean => return false,
         .builtin => return false,
@@ -237,7 +251,21 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
             return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
-        .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        .function_expression => return std.fmt.bufPrint(buffer, "Function@{}", .{position}),
+        .array => {
+            var local_buffer: [10240]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&local_buffer);
+            const allocator = fba.allocator();
+            var local_array = std.ArrayList(u8).init(allocator);
+            defer local_array.deinit();
+            try local_array.appendSlice("[");
+            for (self.get_data(position).array.items) |pos| {
+                try local_array.appendSlice(try self.ToString(buffer, pos));
+                try local_array.appendSlice(", ");
+            }
+            try local_array.appendSlice("]");
+            return local_array.toOwnedSlice();
+        },
         .builtin => unreachable,
         .return_expression => unreachable,
     }
@@ -253,6 +281,7 @@ pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
         .return_expression => "RETURN EXPRESSION",
         .function_expression => "FUNCTION EXPRESSION",
         .runtime_error => "RUNTIME ERROR",
+        .array => "ARRAY",
         .null => "NULL",
         .builtin => "BUILTIN",
     };
@@ -315,6 +344,7 @@ pub const InternalObject = struct {
         runtime_error: StringType,
         string_type: StringType,
         builtin: BuiltInFn,
+        array: *std.ArrayListUnmanaged(ObjectIndex),
     };
 
     const FunctionExpression = extern struct {
@@ -331,6 +361,10 @@ pub const InternalObject = struct {
         env: *Environment,
     };
 
+    pub const ArrayType = struct {
+        data: []const ObjectIndex,
+    };
+
     pub const StringType = extern struct {
         ptr: [*]u8,
         len: u32,
@@ -341,6 +375,7 @@ pub const ObjectTypes = enum(u8) {
     integer,
     boolean,
     string,
+    array,
     return_expression,
     function_expression,
     runtime_error,
@@ -430,7 +465,6 @@ test "test_object" {
         .env = env,
     };
     const func_loc = try pool.create(allocator, .function_expression, @ptrCast(&func_data));
-
 
     try testing.expectEqual(reserved_objects + 1, func_loc);
 

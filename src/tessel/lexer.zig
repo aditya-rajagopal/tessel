@@ -103,6 +103,8 @@ pub fn next_token(self: *Lexer) token.Token {
         ')' => tok.type = .RPAREN,
         '{' => tok.type = .LBRACE,
         '}' => tok.type = .RBRACE,
+        '[' => tok.type = .LBRACKET,
+        ']' => tok.type = .RBRACKET,
         ',' => tok.type = .COMMA,
         ';' => tok.type = .SEMICOLON,
         '"' => {
@@ -296,6 +298,10 @@ test "test_lexing" {
         \\ // Comment at the end of the file should also be skipped correctly
         \\ "foobar"
         \\ "foo bar"
+        \\ [1, "two", three, 4]
+        \\ while (true) {
+        \\   i = i + 1;
+        \\ }
     ;
 
     const tests = [_]struct { expectedType: token.TokenType, expectedLiteral: []const u8 }{
@@ -382,6 +388,27 @@ test "test_lexing" {
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
         .{ .expectedType = .STRING, .expectedLiteral = "foobar" },
         .{ .expectedType = .STRING, .expectedLiteral = "foo bar" },
+        .{ .expectedType = .LBRACKET, .expectedLiteral = "[" },
+        .{ .expectedType = .INT, .expectedLiteral = "1" },
+        .{ .expectedType = .COMMA, .expectedLiteral = "," },
+        .{ .expectedType = .STRING, .expectedLiteral = "two" },
+        .{ .expectedType = .COMMA, .expectedLiteral = "," },
+        .{ .expectedType = .IDENT, .expectedLiteral = "three" },
+        .{ .expectedType = .COMMA, .expectedLiteral = "," },
+        .{ .expectedType = .INT, .expectedLiteral = "4" },
+        .{ .expectedType = .RBRACKET, .expectedLiteral = "]" },
+        .{ .expectedType = .WHILE, .expectedLiteral = "while" },
+        .{ .expectedType = .LPAREN, .expectedLiteral = "(" },
+        .{ .expectedType = .TRUE, .expectedLiteral = "true" },
+        .{ .expectedType = .RPAREN, .expectedLiteral = ")" },
+        .{ .expectedType = .LBRACE, .expectedLiteral = "{" },
+        .{ .expectedType = .IDENT, .expectedLiteral = "i" },
+        .{ .expectedType = .ASSIGN, .expectedLiteral = "=" },
+        .{ .expectedType = .IDENT, .expectedLiteral = "i" },
+        .{ .expectedType = .PLUS, .expectedLiteral = "+" },
+        .{ .expectedType = .INT, .expectedLiteral = "1" },
+        .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
+        .{ .expectedType = .RBRACE, .expectedLiteral = "}" },
         .{ .expectedType = .EOF, .expectedLiteral = "" },
     };
     var lex = Lexer.init(input);
