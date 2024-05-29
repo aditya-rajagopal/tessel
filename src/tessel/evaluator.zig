@@ -456,7 +456,7 @@ fn eval_array_index(
 
     defer self.object_pool.free(allocator, array);
 
-    if (array_tag != .array) {
+    if (array_tag != .array and array_tag != .string) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Cannot Index into type: {s}",
@@ -482,28 +482,58 @@ fn eval_array_index(
         return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
     const index_value = self.object_pool.get_data(index).integer;
-    const array_data = self.object_pool.get_data(array).array;
-    const len = @as(i64, @intCast(array_data.items.len));
-    if (index_value >= len or index_value < -(len - 1)) {
-        const output = try std.fmt.allocPrint(
-            allocator,
-            "Index out of bounds for array with length: {d}. Got {d}",
-            .{ len, index_value },
-        );
-        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
-    }
+    switch (array_tag) {
+        .array => {
+            const array_data = self.object_pool.get_data(array).array;
+            const len = @as(i64, @intCast(array_data.items.len));
+            if (index_value >= len or index_value < -(len - 1)) {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Index out of bounds for array with length: {d}. Got {d}",
+                    .{ len, index_value },
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            }
 
-    var return_object: ObjectIndex = null_object;
-    if (index_value >= 0) {
-        const i = @as(usize, @intCast(index_value));
-        return_object = array_data.items[i];
-    } else {
-        const i = @as(usize, @intCast(len + index_value));
-        return_object = array_data.items[i];
-    }
-    self.object_pool.increase_ref(return_object);
+            var return_object: ObjectIndex = null_object;
+            if (index_value >= 0) {
+                const i = @as(usize, @intCast(index_value));
+                return_object = array_data.items[i];
+            } else {
+                const i = @as(usize, @intCast(len + index_value));
+                return_object = array_data.items[i];
+            }
+            self.object_pool.increase_ref(return_object);
 
-    return return_object;
+            return return_object;
+        },
+        .string => {
+            const string_data = self.object_pool.get_data(array).string_type;
+            const len = @as(i64, @intCast(string_data.len));
+            if (index_value >= len or index_value < -(len - 1)) {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Index out of bounds for string with length: {d}. Got {d}",
+                    .{ len, index_value },
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            }
+
+            var return_object: ObjectIndex = null_object;
+            if (index_value >= 0) {
+                const i = @as(usize, @intCast(index_value));
+                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.ptr[i]});
+                return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
+            } else {
+                const i = @as(usize, @intCast(len + index_value));
+                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.ptr[i]});
+                return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
+            }
+
+            return return_object;
+        },
+        else => unreachable,
+    }
 }
 
 fn eval_array_literal(

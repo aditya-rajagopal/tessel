@@ -9,7 +9,7 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
-    const file_name = args.next() orelse return try repl.start(allocator);
+    const file_name = args.next() orelse return try repl.start();
     if (file_name.len < 4) {
         std.debug.print("Unkown parameter provided: \"{s}\". Expected a .tes file\n", .{file_name});
         return;

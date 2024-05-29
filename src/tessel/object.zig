@@ -175,8 +175,6 @@ pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void
     }
     if (self.object_pool.items(.refs)[position] == 0) {
         _ = self.free_possible_memory(allocator, position);
-        self.object_pool.items(.tag)[position] = .null;
-        self.object_pool.items(.data)[position].integer = 0;
         self.free_list.appendAssumeCapacity(position);
     } else {
         self.object_pool.items(.refs)[position] -= 1;
@@ -224,6 +222,8 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
         .continue_statement => return false,
         .builtin => return false,
     }
+    self.object_pool.items(.tag)[position] = .null;
+    self.object_pool.items(.data)[position].integer = 0;
     return true;
 }
 

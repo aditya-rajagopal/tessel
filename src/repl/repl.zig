@@ -7,7 +7,7 @@ const EXIT = "exit()";
 // const CLEAR = "clear()";
 
 /// Function that starts the REPL. It creates a stdout/in reader/writer and connects the the lexer
-pub fn start(allocator: Allocator) !void {
+pub fn start() !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
@@ -18,6 +18,12 @@ pub fn start(allocator: Allocator) !void {
 
     try print_header(stdout);
     try bw.flush();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) @panic("MEMORY LEAK");
+    }
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
