@@ -31,9 +31,7 @@ pub fn start() !void {
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
 
-    var env = try Environment.Create(allocator);
-    var eval = try Evaluator.init(allocator, env, &identifier_map);
-    defer env.deinit(allocator, &eval.object_pool);
+    var eval = try Evaluator.init(allocator, global_env, &identifier_map);
     defer eval.deinit(allocator);
 
     while (true) {
@@ -91,7 +89,7 @@ pub fn start() !void {
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
             // identifier_map.print_env_hashmap_stderr();
-            const output = try eval.evaluate_program(&ast, allocator, env);
+            const output = try eval.evaluate_program(&ast, allocator, global_env);
             const outstr = try eval.object_pool.ToString(&buffer, output);
             const tag = eval.object_pool.get_tag(output);
             switch (tag) {
@@ -102,7 +100,6 @@ pub fn start() !void {
             eval.object_pool.free(allocator, output);
         }
     }
-    env.deinit(allocator, &eval.object_pool);
     eval.deinit(allocator);
 }
 
@@ -122,3 +119,4 @@ const Evaluator = @import("../tessel/evaluator.zig");
 const object = @import("../tessel/object.zig");
 const Environment = @import("../tessel/environment.zig");
 const IdentifierMap = @import("../tessel/identifier_map.zig");
+const global_env = @import("../tessel/environment_pool.zig").global_env;

@@ -103,7 +103,6 @@ pub fn update_variable(self: *Environment, key: IdentifierIndex, value: ObjectIn
 
 pub fn print_env_hashmap_stderr(self: *Environment) void {
     var it = self.memory.iterator();
-    std.debug.print("\n", .{});
     std.debug.print("Environment Hash map: \n", .{});
     while (it.next()) |value_ptr| {
         std.debug.print(

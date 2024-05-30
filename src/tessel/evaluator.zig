@@ -4,27 +4,30 @@ pub const Evaluator = @This();
 // do not exist anymore.
 
 object_pool: ObjectPool,
+environment_pool: EnvironmentPool,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator, env: *Environment, map: *IdentifierMap) !Evaluator {
+pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *IdentifierMap) !Evaluator {
     var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
+        .environment_pool = try EnvironmentPool.init(allocator),
     };
 
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
         const hash = try map.create(allocator, f.name);
-        try env.create_variable(allocator, hash, position, .constant);
+        try eval.environment_pool.create_variable(env, allocator, hash, position, .constant);
     }
     return eval;
 }
 
 pub fn deinit(self: *Evaluator, allocator: Allocator) void {
+    self.environment_pool.deinit(allocator, &self.object_pool);
     self.object_pool.deinit(allocator);
 }
 
-pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: *Environment) Error!ObjectIndex {
+pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: EnvironmentIndex) Error!ObjectIndex {
     const root_node = ast.nodes.get(0);
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
 
@@ -36,7 +39,7 @@ fn evaluate_program_statements(
     ast: *const Ast,
     statemnts: []u32,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     for (statemnts, 0..) |s, i| {
         const obj_pos = try self.eval_statement(ast, s, allocator, env);
@@ -75,7 +78,7 @@ fn evaluate_block(
     ast: *const Ast,
     statemnts: []u32,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
     allow_break_continue: bool,
 ) Error!ObjectIndex {
     for (statemnts, 0..) |s, i| {
@@ -114,7 +117,7 @@ fn eval_statement(
     ast: *const Ast,
     node: Ast.Node.NodeIndex,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) !ObjectIndex {
     if (node >= ast.nodes.len) {
         return null_object;
@@ -155,7 +158,7 @@ fn eval_var_decl(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const value_pos = try self.eval_expression(ast, node.node_data.rhs, allocator, env);
     const value_tag = self.object_pool.get_tag(value_pos);
@@ -206,7 +209,7 @@ fn eval_var_decl(
 
     const ident_node = ast.nodes.get(node.node_data.lhs);
 
-    _ = env.create_variable(allocator, ident_node.node_data.lhs, actual_pos, tag) catch |err| switch (err) {
+    _ = self.environment_pool.create_variable(env, allocator, ident_node.node_data.lhs, actual_pos, tag) catch |err| switch (err) {
         Environment.Error.VariableAlreadyInitialised => {
             const output = try std.fmt.allocPrint(
                 allocator,
@@ -218,6 +221,14 @@ fn eval_var_decl(
         Environment.Error.NonExistantVariable => unreachable,
         Environment.Error.ConstVariableModification => unreachable,
         Environment.Error.ExceedingMaxDepth => unreachable,
+        EnvironmentPool.EnvPoolError.AccessingFreeEnv => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Something has gone horribly wrong. Accessing environment that is not initialized",
+                .{},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        },
         else => |overflow| return overflow,
     };
     self.object_pool.increase_ref(actual_pos);
@@ -229,7 +240,7 @@ fn eval_var_assign(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const value_pos = try self.eval_expression(ast, node.node_data.rhs, allocator, env);
     const value_tag = self.object_pool.get_tag(value_pos);
@@ -274,7 +285,7 @@ fn eval_var_assign(
 
     const ident_node = ast.nodes.get(node.node_data.lhs);
     const hash = ident_node.node_data.lhs;
-    const old_obj = env.update_variable(hash, actual_pos) catch |err| switch (err) {
+    const old_obj = self.environment_pool.update_variable(env, hash, actual_pos) catch |err| switch (err) {
         Environment.Error.NonExistantVariable => {
             const output = try std.fmt.allocPrint(
                 allocator,
@@ -288,6 +299,14 @@ fn eval_var_assign(
                 allocator,
                 "Identifier \"{s}\" is declared as a constant and cannot be modified",
                 .{get_token_literal(ast, ident_node.main_token)},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        },
+        EnvironmentPool.EnvPoolError.AccessingFreeEnv => {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Something has gone horribly wrong. Accessing environment that is not initialized",
+                .{},
             );
             return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
         },
@@ -305,7 +324,7 @@ fn eval_while_loop(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     while (true) {
         const truth = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
@@ -334,7 +353,7 @@ fn eval_expression(
     ast: *const Ast,
     node: Ast.Node.NodeIndex,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     if (node >= ast.nodes.len) {
         return null_object;
@@ -370,7 +389,14 @@ fn eval_expression(
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
             const hash = ast_node.node_data.lhs;
-            const value_pos = env.get_object(hash);
+            const value_pos = self.environment_pool.get_object(env, hash) catch {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Something has gone horribly wrong. Accessing environment that is not initialized",
+                    .{},
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            };
             if (value_pos == null_object) {
                 const output = try std.fmt.allocPrint(
                     allocator,
@@ -446,7 +472,7 @@ fn eval_array_index(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const array = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
     const array_tag = self.object_pool.get_tag(array);
@@ -541,7 +567,7 @@ fn eval_array_literal(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const elements = try self.eval_expression_list(ast, node.node_data.lhs, node.node_data.rhs, allocator, env);
     defer allocator.free(elements);
@@ -569,7 +595,7 @@ fn eval_function_call(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const function = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
     const function_tag = self.object_pool.get_tag(function);
@@ -678,21 +704,43 @@ fn call_function(
             const return_value_type = self.object_pool.get_tag(out_data.return_value);
             switch (return_value_type) {
                 .function_expression => {
-                    try function_data.function.env.add_child(allocator, function_body_env);
+                    self.environment_pool.add_child(function_data.function.env, allocator, function_body_env) catch |err| switch (err) {
+                        EnvironmentPool.EnvPoolError.AccessingFreeEnv => {
+                            const output = try std.fmt.allocPrint(
+                                allocator,
+                                "Something has gone horribly wrong. Accessing environment that is not initialized",
+                                .{},
+                            );
+                            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+                        },
+                        else => |overflow| return overflow,
+                    };
+                    // try function_data.function.env.add_child(allocator, function_body_env);
                     return out_data.return_value;
                 },
                 else => {
-                    defer function_body_env.deinit(allocator, &self.object_pool);
+                    defer self.environment_pool.free_env(allocator, function_body_env, &self.object_pool);
                     return out_data.return_value;
                 },
             }
         },
         .function_expression => {
-            try function_data.function.env.add_child(allocator, function_body_env);
+            self.environment_pool.add_child(function_data.function.env, allocator, function_body_env) catch |err| switch (err) {
+                EnvironmentPool.EnvPoolError.AccessingFreeEnv => {
+                    const output = try std.fmt.allocPrint(
+                        allocator,
+                        "Something has gone horribly wrong. Accessing environment that is not initialized",
+                        .{},
+                    );
+                    return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+                },
+                else => |overflow| return overflow,
+            };
+            // try function_data.function.env.add_child(allocator, function_body_env);
             return out;
         },
         else => {
-            defer function_body_env.deinit(allocator, &self.object_pool);
+            defer self.environment_pool.free_env(allocator, function_body_env, &self.object_pool);
             return out;
         },
     }
@@ -704,18 +752,19 @@ fn get_function_body_env(
     func: ObjectPool.InternalObject.ObjectData,
     args: []const ObjectIndex,
     allocator: Allocator,
-) !?*Environment {
-    const env = try Environment.CreateEnclosed(allocator, func.function.env);
+) !?EnvironmentIndex {
+    const env = try self.environment_pool.create_env(allocator, func.function.env);
     if (func.function.parameters_len == 0) {
         return env;
     }
     _ = ast;
 
     for (func.function.parameters_ptr[0..func.function.parameters_len], 0..args.len) |param, arg| {
-        env.create_variable(allocator, param, args[arg], .constant) catch |err| switch (err) {
+        self.environment_pool.create_variable(env, allocator, param, args[arg], .constant) catch |err| switch (err) {
             Environment.Error.VariableAlreadyInitialised => {
                 return null;
             },
+            EnvironmentPool.EnvPoolError.AccessingFreeEnv => return null,
             Environment.Error.NonExistantVariable => unreachable,
             Environment.Error.ConstVariableModification => unreachable,
             else => |overflow| return overflow,
@@ -731,7 +780,7 @@ fn eval_expression_list(
     expression_start: Ast.Node.NodeIndex,
     expression_end: Ast.Node.NodeIndex,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) ![]ObjectIndex {
     var arguments = std.ArrayList(ObjectIndex).init(allocator);
     defer arguments.deinit();
@@ -754,7 +803,7 @@ fn eval_function_expression(
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     var parameters = std.ArrayList(Ast.Node.NodeIndex).init(allocator);
     defer parameters.deinit();
@@ -983,7 +1032,7 @@ fn eval_if_expression(
     ast: *const Ast,
     ast_node: Ast.Node,
     allocator: Allocator,
-    env: *Environment,
+    env: EnvironmentIndex,
 ) Error!ObjectIndex {
     const condition_pos = try self.eval_expression(ast, ast_node.node_data.lhs, allocator, env);
     const condition_type = self.object_pool.get_tag(condition_pos);
@@ -1499,22 +1548,22 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         }
         var identifier_map = IdentifierMap.init();
         defer identifier_map.deinit(testing.allocator);
-        var env = try Environment.Create(testing.allocator);
-        var eval = try Evaluator.init(testing.allocator, env, &identifier_map);
+        // var env = try Environment.Create(testing.allocator);
+        var eval = try Evaluator.init(testing.allocator, global_env, &identifier_map);
         defer {
-            env.deinit(testing.allocator, &eval.object_pool);
+            // env.deinit(testing.allocator, &eval.object_pool);
             eval.deinit(testing.allocator);
         }
         var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
 
-        const output = try eval.evaluate_program(&ast, testing.allocator, env);
+        const output = try eval.evaluate_program(&ast, testing.allocator, global_env);
         const outstr = try eval.object_pool.ToString(&buffer, output);
         if (enable_debug_print) {
             std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });
             try Parser.print_parser_errors_to_stderr(&ast);
             identifier_map.print_env_hashmap_stderr();
-            env.print_env_hashmap_stderr();
+            eval.environment_pool.print_to_stderr();
             try eval.object_pool.print_object_pool_to_stderr();
             for (0..ast.nodes.len) |i| {
                 const n = ast.nodes.get(i);
@@ -1551,3 +1600,6 @@ const break_object = ObjectPool.break_object;
 const continue_object = ObjectPool.continue_object;
 const IdentifierMap = @import("identifier_map.zig");
 const Builtins = @import("builtins.zig");
+const EnvironmentPool = @import("environment_pool.zig");
+const EnvironmentIndex = EnvironmentPool.EnvironmentIndex;
+const global_env = EnvironmentPool.global_env;

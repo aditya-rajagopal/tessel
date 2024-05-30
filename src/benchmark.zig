@@ -30,6 +30,12 @@ fn fibonacci(x: u32) u32 {
 
 pub fn main() !void {
     std.debug.print("Testing Fibonacci(35) Using tessel: {s}\n", .{tessel_fibonacci_35});
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // defer {
+    //     const deinit_status = gpa.deinit();
+    //     if (deinit_status == .leak) @panic("MEMORY LEAK");
+    // }
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -37,23 +43,23 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
-    var env = try Environment.Create(allocator);
-    var eval = try Evaluator.init(allocator, env, &identifier_map);
+    var eval = try Evaluator.init(allocator, global_env, &identifier_map);
     std.debug.print("Object Pool Capacity start {d}\n", .{eval.object_pool.object_pool.capacity});
+    // eval.environment_pool.print_to_stderr();
+    // try eval.object_pool.print_object_pool_to_stderr();
     var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &identifier_map);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try eval.evaluate_program(&ast, allocator, env);
+    const output = try eval.evaluate_program(&ast, allocator, global_env);
 
     const outstr = try eval.object_pool.ToString(&buffer, output);
     const end_time = timer.read();
     std.debug.print("Object Pool Capacity End {d}\n", .{eval.object_pool.object_pool.capacity});
-    // env.print_env_hashmap_stderr();
+    // eval.environment_pool.print_to_stderr();
     // try eval.object_pool.print_object_pool_to_stderr();
     std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ outstr, std.fmt.fmtDuration(end_time) });
     eval.object_pool.free(allocator, output);
-    env.deinit(allocator, &eval.object_pool);
     eval.deinit(allocator);
 }
 
@@ -63,3 +69,4 @@ const Evaluator = @import("tessel/evaluator.zig");
 const object = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
 const IdentifierMap = @import("tessel/identifier_map.zig");
+const global_env = @import("tessel/environment_pool.zig").global_env;

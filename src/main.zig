@@ -2,6 +2,26 @@ const std = @import("std");
 const repl = @import("repl/repl.zig");
 
 pub fn main() !void {
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // defer {
+    //     const deinit_status = gpa.deinit();
+    //     if (deinit_status == .leak) @panic("MEMORY LEAK");
+    // }
+    // var object_pool = try ObjectPool.init(allocator);
+    // var env_pool = try EnvironmentPool.initCapacity(allocator, 3);
+    // try env_pool.create_variable(EnvironmentPool.global_env, allocator, 1, 2, .constant);
+    // defer env_pool.deinit(allocator, &object_pool);
+    // env_pool.print_to_stderr();
+    // // try object_pool.print_object_pool_to_stderr();
+    // const env1 = try env_pool.create_env(allocator, EnvironmentPool.global_env);
+    // try env_pool.create_variable(env1, allocator, 0, 1, .constant);
+    // const a = try env_pool.get_object(env1, 1);
+    // std.debug.print("Got object: {d}\n", .{a});
+    // env_pool.print_to_stderr();
+    // env_pool.free_env(env1);
+    // env_pool.print_to_stderr();
+    // object_pool.deinit(allocator);
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -29,28 +49,28 @@ pub fn main() !void {
 
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
-    var env = try Environment.Create(allocator);
 
-    var eval = try Evaluator.init(allocator, env, &identifier_map);
+    var eval = try Evaluator.init(allocator, global_env, &identifier_map);
 
     var ast = try Parser.parse_program(buffer[0..out :0], allocator, &identifier_map);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try eval.evaluate_program(&ast, allocator, env);
+    const output = try eval.evaluate_program(&ast, allocator, global_env);
 
     const outstr = try eval.object_pool.ToString(&out_buffer, output);
     const end_time = timer.read();
     std.debug.print("{s}\n", .{outstr});
     std.debug.print("Program runtime: {d}\n", .{std.fmt.fmtDuration(end_time)});
     eval.object_pool.free(allocator, output);
-    env.deinit(allocator, &eval.object_pool);
     eval.deinit(allocator);
 }
 
 const lexer = @import("tessel/lexer.zig");
 const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
-const object = @import("tessel/object.zig");
+const ObjectPool = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
 const IdentifierMap = @import("tessel/identifier_map.zig");
+const EnvironmentPool = @import("tessel/environment_pool.zig");
+const global_env = @import("tessel/environment_pool.zig").global_env;

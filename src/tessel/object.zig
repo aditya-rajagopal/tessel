@@ -378,7 +378,7 @@ pub const InternalObject = struct {
     };
 
     const FunctionExpression = extern struct {
-        env: *Environment,
+        env: EnvironmentIndex,
         block_ptr: [*]Ast.Node.NodeIndex,
         block_len: u32,
         parameters_ptr: [*]Ast.Node.NodeIndex,
@@ -388,7 +388,7 @@ pub const InternalObject = struct {
     pub const FunctionData = struct {
         block: []Ast.Node.NodeIndex,
         parameters: []Ast.Node.NodeIndex,
-        env: *Environment,
+        env: EnvironmentIndex,
     };
 
     pub const ArrayType = struct {
@@ -489,12 +489,12 @@ test "test_object" {
     try blocks.appendSlice(&[_]u32{ 1, 2, 3, 5 });
     var params = std.ArrayList(u32).init(allocator);
     try params.appendSlice(&[_]u32{ 1, 2 });
-    const env = try Environment.Create(allocator);
-    defer env.deinit(allocator, &pool);
+    // const env = try Environment.Create(allocator);
+    // defer env.deinit(allocator, &pool);
     const func_data = InternalObject.FunctionData{
         .block = try blocks.toOwnedSlice(),
         .parameters = try params.toOwnedSlice(),
-        .env = env,
+        .env = 0,
     };
     const func_loc = try pool.create(allocator, .function_expression, @ptrCast(&func_data));
 
@@ -523,4 +523,5 @@ const token = @import("token.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
 const Environment = @import("environment.zig");
+const EnvironmentIndex = @import("environment_pool.zig").EnvironmentIndex;
 const Evaluator = @import("evaluator.zig");
