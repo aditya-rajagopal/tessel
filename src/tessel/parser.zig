@@ -340,7 +340,7 @@ const OperatorHierarchy = std.enums.directEnumArrayDefault(token.TokenType, Oper
     // Functions are of the form .IDENT(.ARGUMENTS. So we can treat ( as an infix operator and declare it
     // a function call. In no other instance can you have an expression followed by a (.
     .LPAREN = .{ .precedence = 110, .tag = .FUNCTION_CALL },
-    .LBRACKET = .{ .precedence = 110, .tag = .ARRAY_INDEX },
+    .LBRACKET = .{ .precedence = 110, .tag = .INDEX_INTO },
 });
 
 fn parse_expect_expression(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -385,7 +385,7 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
             continue;
         }
         if (self.token_tags[operator_token] == .LBRACKET) {
-            cur_node = try self.parse_array_index(cur_node, operator_token);
+            cur_node = try self.parse_index_into(cur_node, operator_token);
             continue;
         }
 
@@ -497,6 +497,9 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
             _ = try self.expect_token(.RPAREN);
             return node;
         },
+        .LBRACE => {
+            return self.parse_hash_map();
+        },
         .LBRACKET => return self.parse_array_literal(),
         .IF => return self.parse_if_expression(),
         .FUNCTION => return self.parse_function_expression(),
@@ -510,6 +513,87 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
             return Error.ParsingError;
         },
     }
+}
+
+fn parse_hash_map(self: *Parser) Error!Ast.Node.NodeIndex {
+    const hash_token = try self.expect_token(.LBRACE);
+    if (self.is_current_token(.RBRACE)) {
+        _ = self.eat_token(.RBRACKET);
+        return self.add_node(.{
+            .tag = .HASH_LITERAL,
+            .main_token = hash_token,
+            .node_data = .{
+                .lhs = 0,
+                .rhs = 0,
+            },
+        });
+    }
+    const scratch_top = self.scratch_pad.items.len;
+    defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
+    while (true) {
+        const map = try self.parse_expect_map();
+        if (map == 0) {
+            try self.add_error(.{
+                .tag = .expected_map, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            continue;
+        }
+        try self.scratch_pad.append(self.allocator, map);
+        if (self.is_current_token(.RBRACE)) break;
+        _ = try self.expect_token(.COMMA);
+    }
+    const extra_data_locs = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
+    _ = self.eat_token(.RBRACE);
+    return self.add_node(.{
+        .tag = .HASH_LITERAL, //
+        .main_token = hash_token,
+        .node_data = .{
+            .lhs = extra_data_locs.start, //
+            .rhs = extra_data_locs.end,
+        },
+    });
+}
+
+fn parse_expect_map(self: *Parser) Error!Ast.Node.NodeIndex {
+    const node = try self.parse_map();
+    if (node == 0) {
+        try self.add_error(.{
+            .tag = .expected_expression, //
+            .token = self.token_current,
+            .expected = .ILLEGAL,
+        });
+        _ = self.next_token();
+        return null_node;
+    } else {
+        return node;
+    }
+}
+
+fn parse_map(self: *Parser) Error!Ast.Node.NodeIndex {
+    const map = try self.add_node(.{
+        .tag = .HASH_ELEMENT,
+        .main_token = 0,
+        .node_data = .{
+            .lhs = 0,
+            .rhs = 0,
+        },
+    });
+
+    const lhs = try self.parse_expect_expression();
+    if (lhs == 0) {
+        return null_node;
+    }
+    const colon = try self.expect_token(.COLON);
+    const rhs = try self.parse_expect_expression();
+    if (rhs == 0) {
+        return null_node;
+    }
+    self.nodes.items(.main_token)[map] = colon;
+    self.nodes.items(.node_data)[map].lhs = lhs;
+    self.nodes.items(.node_data)[map].rhs = rhs;
+    return map;
 }
 
 fn parse_array_literal(self: *Parser) Error!Ast.Node.NodeIndex {
@@ -683,7 +767,7 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
     });
 }
 
-fn parse_array_index(
+fn parse_index_into(
     self: *Parser,
     array_literal: Ast.Node.NodeIndex,
     operator: Ast.Node.NodeIndex,
@@ -697,9 +781,34 @@ fn parse_array_index(
         });
         return null_node;
     }
+    if (self.is_current_token(.COLON)) {
+        _ = self.eat_token(.COLON);
+        const index_end = try self.parse_expect_expression();
+        if (index_end == 0) {
+            try self.add_error(.{
+                .tag = .expected_expression, //
+                .token = self.token_current,
+                .expected = .ILLEGAL,
+            });
+            return null_node;
+        }
+        _ = try self.expect_token(.RBRACKET);
+
+        const location = self.extra_data.items.len;
+        try self.extra_data.append(self.allocator, index);
+        try self.extra_data.append(self.allocator, index_end);
+        return self.add_node(.{
+            .tag = .INDEX_RANGE, //
+            .main_token = operator,
+            .node_data = .{
+                .lhs = array_literal, //
+                .rhs = @as(u32, @intCast(location)),
+            },
+        });
+    }
     _ = try self.expect_token(.RBRACKET);
     return self.add_node(.{
-        .tag = .ARRAY_INDEX, //
+        .tag = .INDEX_INTO, //
         .main_token = operator,
         .node_data = .{
             .lhs = array_literal, //
@@ -1731,7 +1840,7 @@ test "parser_array_expression" {
             .expectedDataRHS = 7,
         },
         .{
-            .expectedNodeType = .ARRAY_INDEX, //
+            .expectedNodeType = .INDEX_INTO, //
             .expectedMainToken = 7,
             .expectedDataLHS = 5,
             .expectedDataRHS = 8,

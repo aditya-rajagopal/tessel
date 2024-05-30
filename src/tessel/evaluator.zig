@@ -383,8 +383,14 @@ fn eval_expression(
         .ARRAY_LITERAL => {
             obj = try self.eval_array_literal(ast, ast_node, allocator, env);
         },
-        .ARRAY_INDEX => {
-            obj = try self.eval_array_index(ast, ast_node, allocator, env);
+        .HASH_LITERAL => {
+            obj = try self.eval_hash_map(ast, ast_node, allocator, env);
+        },
+        .INDEX_INTO => {
+            obj = try self.eval_index_into(ast, ast_node, allocator, env);
+        },
+        .INDEX_RANGE => {
+            obj = try self.eval_index_range(ast, ast_node, allocator, env);
         },
         .IDENTIFIER => {
             const ident_name = get_token_literal(ast, ast_node.main_token);
@@ -467,26 +473,198 @@ fn eval_expression(
     return obj;
 }
 
-fn eval_array_index(
+fn eval_hash_map(
     self: *Evaluator,
     ast: *const Ast,
     node: Ast.Node,
     allocator: Allocator,
     env: EnvironmentIndex,
 ) Error!ObjectIndex {
-    const array = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
-    const array_tag = self.object_pool.get_tag(array);
-    if (array_tag == .runtime_error) {
-        return array;
+    const map_start = node.node_data.lhs;
+    const map_end = node.node_data.rhs;
+    const elements = ast.extra_data[map_start..map_end];
+
+    const map = try self.object_pool.create(allocator, .hash_map, @ptrCast(&elements.len));
+    for (elements) |e| {
+        const element_node = ast.nodes.get(e);
+        const key = try self.eval_expression(ast, element_node.node_data.lhs, allocator, env);
+        const key_tag = self.object_pool.get_tag(key);
+        if (key_tag != .integer and key_tag != .string and key_tag != .boolean) {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Expected key for hashmap to be INTEGER, STRING, OR BOOLEAN. Got {s}",
+                .{self.object_pool.get_tag_string(key)},
+            );
+            self.object_pool.free(allocator, key);
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        }
+        const hash_key = ObjectPool.InternalObject.HashKey.create(self.object_pool.get(key));
+        const value = try self.eval_expression(ast, element_node.node_data.rhs, allocator, env);
+        if (value == null_object) {
+            const output = try std.fmt.allocPrint(
+                allocator,
+                "Missing value for key in hash map.",
+                .{},
+            );
+            return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+        }
+        try self.object_pool.object_pool.items(.data)[map].hash_map.map.put(allocator, hash_key, value);
+        try self.object_pool.object_pool.items(.data)[map].hash_map.keys.append(allocator, key);
+        self.object_pool.increase_ref(value);
+        self.object_pool.increase_ref(key);
+    }
+    return map;
+}
+
+fn eval_index_range(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: EnvironmentIndex,
+) Error!ObjectIndex {
+    const literal = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
+    const literal_tag = self.object_pool.get_tag(literal);
+    if (literal_tag == .runtime_error) {
+        return literal;
     }
 
-    defer self.object_pool.free(allocator, array);
+    defer self.object_pool.free(allocator, literal);
 
-    if (array_tag != .array and array_tag != .string) {
+    if (literal_tag != .array and literal_tag != .string) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Cannot slice into type: {s}",
+            .{self.object_pool.get_tag_string(literal)},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    const l_index = try self.eval_expression(ast, ast.extra_data[node.node_data.rhs], allocator, env);
+    const l_index_tag = self.object_pool.get_tag(l_index);
+
+    if (l_index_tag == .runtime_error) {
+        return literal;
+    }
+
+    defer self.object_pool.free(allocator, l_index);
+
+    if (l_index_tag != .integer) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Left of an index range should evaluate to an integer. Got {d}",
+            .{self.object_pool.get_tag_string(l_index)},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    const r_index = try self.eval_expression(ast, ast.extra_data[node.node_data.rhs + 1], allocator, env);
+    const r_index_tag = self.object_pool.get_tag(r_index);
+
+    if (r_index_tag == .runtime_error) {
+        return literal;
+    }
+
+    defer self.object_pool.free(allocator, r_index);
+
+    if (r_index_tag != .integer) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Right of an index range should evaluate to an integer. Got {d}",
+            .{self.object_pool.get_tag_string(r_index)},
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+
+    const len = switch (literal_tag) {
+        .array => @as(i64, @intCast(self.object_pool.get_data(literal).array.items.len)),
+        .string => @as(i64, @intCast(self.object_pool.get_data(literal).string_type.len)),
+        else => unreachable,
+    };
+
+    const l_index_value = self.object_pool.get_data(l_index).integer;
+    const r_index_value = self.object_pool.get_data(r_index).integer;
+    if (l_index_value >= len or l_index_value < -(len - 1)) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Left index out of bounds for {s} with length: {d}. Got {d}",
+            .{ self.object_pool.get_tag_string(literal), len, l_index_value },
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+    if (r_index_value > len or r_index_value < -(len - 1)) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Left index out of bounds for {s} with length: {d}. Got {d}",
+            .{ self.object_pool.get_tag_string(literal), len, r_index_value },
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+
+    var left: usize = undefined;
+    var right: usize = undefined;
+    if (l_index_value >= 0) {
+        left = @as(usize, @intCast(l_index_value));
+    } else {
+        left = @as(usize, @intCast(len + l_index_value));
+    }
+    if (r_index_value >= 0) {
+        right = @as(usize, @intCast(r_index_value));
+    } else {
+        right = @as(usize, @intCast(len + r_index_value));
+    }
+    if (r_index_value > l_index) {
+        const output = try std.fmt.allocPrint(
+            allocator,
+            "Left index must be lower than right index. Got left: {d} right: {d}",
+            .{ left, right },
+        );
+        return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+    }
+
+    switch (literal_tag) {
+        .array => {
+            const array_data = self.object_pool.get_data(literal).array;
+            const items = array_data.items[left..right];
+            for (items) |obj| {
+                self.object_pool.increase_ref(obj);
+            }
+            const array_storage = ObjectPool.InternalObject.ArrayType{
+                .data = items,
+            };
+            const return_object = try self.object_pool.create(allocator, .array, @ptrCast(&array_storage));
+
+            return return_object;
+        },
+        .string => {
+            const string_data = self.object_pool.get_data(literal).string_type;
+            const out_str = try std.fmt.allocPrint(allocator, "{s}", .{string_data.ptr[left..right]});
+            const return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
+
+            return return_object;
+        },
+        else => unreachable,
+    }
+}
+
+fn eval_index_into(
+    self: *Evaluator,
+    ast: *const Ast,
+    node: Ast.Node,
+    allocator: Allocator,
+    env: EnvironmentIndex,
+) Error!ObjectIndex {
+    const literal = try self.eval_expression(ast, node.node_data.lhs, allocator, env);
+    const literal_tag = self.object_pool.get_tag(literal);
+    if (literal_tag == .runtime_error) {
+        return literal;
+    }
+
+    defer self.object_pool.free(allocator, literal);
+
+    if (literal_tag != .array and literal_tag != .string and literal_tag != .hash_map) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Cannot Index into type: {s}",
-            .{self.object_pool.get_tag_string(array)},
+            .{self.object_pool.get_tag_string(literal)},
         );
         return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
@@ -494,23 +672,23 @@ fn eval_array_index(
     const index_tag = self.object_pool.get_tag(index);
 
     if (index_tag == .runtime_error) {
-        return array;
+        return literal;
     }
 
     defer self.object_pool.free(allocator, index);
 
-    if (index_tag != .integer) {
+    if (index_tag != .integer and (literal_tag == .array or literal_tag == .string)) {
         const output = try std.fmt.allocPrint(
             allocator,
-            "Cannot Index into an array with index of type: {s}",
-            .{self.object_pool.get_tag_string(index)},
+            "Cannot Index into {s} with index of type: {s}",
+            .{ self.object_pool.get_tag_string(literal), self.object_pool.get_tag_string(index) },
         );
         return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
     }
-    const index_value = self.object_pool.get_data(index).integer;
-    switch (array_tag) {
+    switch (literal_tag) {
         .array => {
-            const array_data = self.object_pool.get_data(array).array;
+            const index_value = self.object_pool.get_data(index).integer;
+            const array_data = self.object_pool.get_data(literal).array;
             const len = @as(i64, @intCast(array_data.items.len));
             if (index_value >= len or index_value < -(len - 1)) {
                 const output = try std.fmt.allocPrint(
@@ -534,7 +712,8 @@ fn eval_array_index(
             return return_object;
         },
         .string => {
-            const string_data = self.object_pool.get_data(array).string_type;
+            const index_value = self.object_pool.get_data(index).integer;
+            const string_data = self.object_pool.get_data(literal).string_type;
             const len = @as(i64, @intCast(string_data.len));
             if (index_value >= len or index_value < -(len - 1)) {
                 const output = try std.fmt.allocPrint(
@@ -557,6 +736,30 @@ fn eval_array_index(
             }
 
             return return_object;
+        },
+        .hash_map => {
+            const map = self.object_pool.get_data(literal).hash_map.map;
+            if (index_tag != .string and index_tag != .integer and index_tag != .boolean) {
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Cannot Index into a hash map with index of type: {s}",
+                    .{self.object_pool.get_tag_string(index)},
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            }
+            const index_hash = ObjectPool.InternalObject.HashKey.create(self.object_pool.get(index));
+            const value = map.get(index_hash) orelse {
+                var buffer: [4096]u8 = undefined;
+                const str = self.object_pool.ToString(&buffer, index) catch unreachable;
+                const output = try std.fmt.allocPrint(
+                    allocator,
+                    "Provided key {s} does not exist in the hashmap",
+                    .{str},
+                );
+                return self.object_pool.create(allocator, .runtime_error, @ptrCast(&output));
+            };
+            self.object_pool.increase_ref(value);
+            return value;
         },
         else => unreachable,
     }
@@ -991,35 +1194,22 @@ fn eval_intint_infix_operation(
         },
         .ADDITION => {
             const res: i64 = left_data.integer + right_data.integer;
-            // self.object_pool.object_pool.items(.data)[left].integer = res;
-            // self.object_pool.increase_ref(left);
-            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .SUBTRACTION => {
             const res: i64 = left_data.integer - right_data.integer;
-            // self.object_pool.object_pool.items(.data)[left].integer = res;
-            // self.object_pool.increase_ref(left);
-            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .MULTIPLY => {
             const res: i64 = left_data.integer * right_data.integer;
-            // self.object_pool.object_pool.items(.data)[left].integer = res;
-            // self.object_pool.increase_ref(left);
-            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         .DIVIDE => {
             const res: i64 = @divFloor(left_data.integer, right_data.integer);
-            // self.object_pool.object_pool.items(.data)[left].integer = res;
-            // self.object_pool.increase_ref(left);
-            // return left;
             return self.object_pool.create(allocator, .integer, @ptrCast(&res));
         },
         inline else => unreachable,
     }
-    // defer self.object_pool.free(allocator, left);
     if (result) {
         return true_object;
     } else {
@@ -1353,6 +1543,7 @@ test "evaluate_string_expressions" {
             ,
             .output = "foobar",
         },
+        .{ .source = "\"foobar\"[-1]", .output = "r" },
     };
 
     try eval_tests(&tests, false);
@@ -1411,6 +1602,29 @@ test "evaluate_return_statements" {
         .{ .source = "9; return 10 * 10; return 5;", .output = "100" },
         .{ .source = "if (1 < 2) { return 10 * 5; }", .output = "50" },
         .{ .source = "10 * if (1 < 2) { 10 * 5; }", .output = "500" },
+    };
+
+    try eval_tests(&tests, false);
+}
+
+test "evaluate_hash_map" {
+    const tests = [_]test_struct{
+        .{
+            .source = "const a = {false: 1 < 2, 1: \"o\" + \"n\" + \"e\", \"two\": 5 * 4 - 3 * 6}; a[false]",
+            .output = "true",
+        },
+        .{
+            .source = "const a = {false: 1 < 2, 1: \"o\" + \"n\" + \"e\", \"two\": 5 * 4 - 3 * 6}; a[1]",
+            .output = "one",
+        },
+        .{
+            .source = "const a = {false: 1 < 2, 1: \"o\" + \"n\" + \"e\", \"two\": 5 * 4 - 3 * 6}; a[\"two\"]",
+            .output = "2",
+        },
+        .{
+            .source = "const a = {false: 1 < 2, 1: \"o\" + \"n\" + \"e\", \"two\": 5 * 4 - 3 * 6, 3: fn(a, b) { return a + b;}}; a[3](2, 4);",
+            .output = "6",
+        },
     };
 
     try eval_tests(&tests, false);
@@ -1573,7 +1787,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
             std.debug.print("Extra Data: ", .{});
             for (0..ast.extra_data.len) |i| {
                 const n = ast.extra_data[i];
-                std.debug.print("{}, ", .{n});
+                std.debug.print("{d}, ", .{n});
             }
 
             std.debug.print("\n", .{});

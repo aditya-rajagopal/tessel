@@ -95,6 +95,16 @@ pub const Node = struct {
         /// lhs = start in the extra data array of the expressions that make up the array
         /// rhs = end in the extra data array of the expressions that make up the array
         ARRAY_LITERAL,
+        /// <int/bool/string literal><colon><expression>
+        /// main_token = :
+        /// lhs: key
+        /// rhs: value
+        HASH_ELEMENT,
+        /// {<hash_map>, <hash_map>, ...}
+        /// main_token = {
+        /// lsh = start in the extra data array of the maps that make up the hash
+        /// rhs = end in the extra data array of the maps that make up the hash
+        HASH_LITERAL,
         /// ! lhs. rhs is empty.
         BOOL_NOT,
         /// - lhs. rhs is empty
@@ -151,11 +161,16 @@ pub const Node = struct {
         /// rhs = location in extra_datas array
         /// the argument expressions nodes are in extra_data[rhs..rhs+2]
         FUNCTION_CALL,
+        /// <lbracket><integer><colon><integer><rbracket>
+        /// main_token = :
+        /// lhs = expression/identifier/literal that returns an array or strign
+        /// rhs = position into extra data for the 2 expressions that evaluate to the start and end of the range.
+        INDEX_RANGE,
         /// Index into an array literal/variable
         /// main_token = [
-        /// lhs = expression/identifier/literal that returns an array
+        /// lhs = expression/identifier/literal that returns an array, string or hashmap
         /// rhs = expression that evaluates to the index.
-        ARRAY_INDEX,
+        INDEX_INTO,
 
         pub fn get_operator_string(tag: Tag) []const u8 {
             switch (tag) {
@@ -189,6 +204,7 @@ pub const Error = struct {
         expected_identifier_after_const, //
         expected_assignent_after_var_decl,
         expected_expression,
+        expected_map,
         illegal_break_or_continue,
         expected_token,
         expected_closing_rparen,

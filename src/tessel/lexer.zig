@@ -107,6 +107,7 @@ pub fn next_token(self: *Lexer) token.Token {
         ']' => tok.type = .RBRACKET,
         ',' => tok.type = .COMMA,
         ';' => tok.type = .SEMICOLON,
+        ':' => tok.type = .COLON,
         '"' => {
             self.read_next_character();
             tok.type = .STRING;
@@ -304,6 +305,7 @@ test "test_lexing" {
         \\   break;
         \\   continue;
         \\ }
+        \\ {"one": 1}
     ;
 
     const tests = [_]struct { expectedType: token.TokenType, expectedLiteral: []const u8 }{
@@ -414,6 +416,11 @@ test "test_lexing" {
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
         .{ .expectedType = .CONTINUE, .expectedLiteral = "continue" },
         .{ .expectedType = .SEMICOLON, .expectedLiteral = ";" },
+        .{ .expectedType = .RBRACE, .expectedLiteral = "}" },
+        .{ .expectedType = .LBRACE, .expectedLiteral = "{" },
+        .{ .expectedType = .STRING, .expectedLiteral = "one" },
+        .{ .expectedType = .COLON, .expectedLiteral = ":" },
+        .{ .expectedType = .INT, .expectedLiteral = "1" },
         .{ .expectedType = .RBRACE, .expectedLiteral = "}" },
         .{ .expectedType = .EOF, .expectedLiteral = "" },
     };

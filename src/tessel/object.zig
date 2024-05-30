@@ -154,6 +154,25 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
             self.object_pool.items(.data)[location].array.* = .{};
             try self.object_pool.items(.data)[location].array.appendSlice(allocator, value.data);
         },
+        .hash_map => {
+            const value: *const u32 = @ptrCast(@alignCast(data));
+            self.object_pool.items(.tag)[location] = .hash_map;
+            self.object_pool.items(.data)[location].hash_map.map = try allocator.create(
+                std.AutoHashMapUnmanaged(
+                    InternalObject.HashKey,
+                    ObjectIndex,
+                ),
+            );
+            self.object_pool.items(.data)[location].hash_map.keys = try allocator.create(
+                std.ArrayListUnmanaged(
+                    ObjectIndex,
+                ),
+            );
+            self.object_pool.items(.data)[location].hash_map.map.* = .{};
+            self.object_pool.items(.data)[location].hash_map.keys.* = .{};
+            try self.object_pool.items(.data)[location].hash_map.map.ensureUnusedCapacity(allocator, value.*);
+            try self.object_pool.items(.data)[location].hash_map.keys.ensureUnusedCapacity(allocator, value.*);
+        },
         .builtin => unreachable,
         .null => unreachable,
         .boolean => unreachable,
@@ -207,6 +226,21 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
                 self.object_pool.items(.data)[position].string_type.ptr[0..self.object_pool.items(.data)[position].string_type.len],
             );
             self.object_pool.items(.data)[position].string_type.len = 0;
+        },
+        .hash_map => {
+            const map = self.object_pool.items(.data)[position].hash_map.map;
+            var value_iter = map.valueIterator();
+            while (value_iter.next()) |value| {
+                self.free(allocator, value.*);
+            }
+            map.deinit(allocator);
+            const keys: *std.ArrayListUnmanaged(ObjectIndex) = self.object_pool.items(.data)[position].hash_map.keys;
+            for (keys.items) |i| {
+                self.free(allocator, i);
+            }
+            keys.deinit(allocator);
+            allocator.destroy(map);
+            allocator.destroy(keys);
         },
         .array => {
             const ptr = self.object_pool.items(.data)[position].array;
@@ -268,7 +302,7 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
             return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
-        .function_expression => return std.fmt.bufPrint(buffer, "Function@{}", .{position}),
+        .function_expression => return std.fmt.bufPrint(buffer, "Function@{d}", .{position}),
         .array => {
             var local_buffer: [10240]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&local_buffer);
@@ -282,6 +316,27 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
             }
             try local_array.appendSlice("]");
             return local_array.toOwnedSlice();
+        },
+        .hash_map => {
+            var local_buffer: [10240]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&local_buffer);
+            const allocator = fba.allocator();
+            var local_array = std.ArrayList(u8).init(allocator);
+            defer local_array.deinit();
+            try local_array.appendSlice("HashMap{");
+            const keys = self.get_data(position).hash_map.keys;
+            const map = self.get_data(position).hash_map.map;
+            for (0..keys.items.len) |i| {
+                const key = keys.items[i];
+                const index_hash = ObjectPool.InternalObject.HashKey.create(self.object_pool.get(key));
+                try local_array.appendSlice(try self.ToString(buffer, key));
+                try local_array.appendSlice(":");
+                try local_array.appendSlice(try self.ToString(buffer, map.get(index_hash).?));
+                try local_array.appendSlice(", ");
+            }
+            try local_array.appendSlice("}");
+            return local_array.toOwnedSlice();
+            // return std.fmt.bufPrint(buffer, "Hash Map@{d}", .{position});
         },
         .builtin => unreachable,
         .return_expression => unreachable,
@@ -301,6 +356,7 @@ pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
         .function_expression => "FUNCTION EXPRESSION",
         .runtime_error => "RUNTIME ERROR",
         .array => "ARRAY",
+        .hash_map => "HASH_MAP",
         .null => "NULL",
         .builtin => "BUILTIN",
         .break_statement => "BREAK",
@@ -335,12 +391,31 @@ pub fn print_object_pool_to_stderr(self: *ObjectPool) !void {
             .return_expression => buf = try std.fmt.bufPrint(&buffer, "{any}", .{data.return_value}),
             .break_statement => buf = try std.fmt.bufPrint(&buffer, "break", .{}),
             .continue_statement => buf = try std.fmt.bufPrint(&buffer, "continue", .{}),
+            .hash_map => {
+                std.debug.print("{{", .{});
+
+                const keys = self.get_data(@as(u32, @intCast(i))).hash_map.keys;
+                const map = self.get_data(@as(u32, @intCast(i))).hash_map.map;
+                for (0..keys.items.len) |k| {
+                    const key = keys.items[k];
+                    const index_hash = ObjectPool.InternalObject.HashKey.create(self.object_pool.get(key));
+                    std.debug.print("{s}", .{try self.ToString(&buffer, key)});
+                    std.debug.print(":", .{});
+                    std.debug.print("{s}", .{try self.ToString(&buffer, map.get(index_hash).?)});
+                    std.debug.print(", ", .{});
+                }
+                std.debug.print("}}", .{});
+                std.debug.print("\n", .{});
+                continue;
+            },
             .array => {
                 std.debug.print("[", .{});
                 for (data.array.items) |pos| {
                     std.debug.print("{s}, ", .{try self.ToString(&buffer, pos)});
                 }
                 std.debug.print("]", .{});
+                std.debug.print("\n", .{});
+                continue;
             },
         }
         std.debug.print("{s}\n", .{buf});
@@ -375,6 +450,63 @@ pub const InternalObject = struct {
         string_type: StringType,
         builtin: BuiltInFn,
         array: *std.ArrayListUnmanaged(ObjectIndex),
+        hash_map: HashData,
+    };
+
+    pub const HashData = extern struct {
+        map: *std.AutoHashMapUnmanaged(HashKey, ObjectIndex),
+        keys: *std.ArrayListUnmanaged(ObjectIndex),
+    };
+
+    pub const HashKey = struct {
+        type: Tag,
+        hash: u64,
+        pub const Tag = enum {
+            pos_integer_key,
+            neg_integer_key,
+            bool_key,
+            string_key,
+        };
+
+        pub fn create(key: InternalObject) HashKey {
+            switch (key.tag) {
+                .integer => {
+                    if (key.data.integer >= 0) {
+                        return .{
+                            .type = .pos_integer_key,
+                            .hash = @as(u64, @intCast(key.data.integer)),
+                        };
+                    } else {
+                        return .{
+                            .type = .neg_integer_key,
+                            .hash = @as(u64, @intCast(-key.data.integer)),
+                        };
+                    }
+                },
+                .boolean => {
+                    if (key.data.boolean) {
+                        return .{
+                            .type = .bool_key,
+                            .hash = @as(u64, @intCast(1)),
+                        };
+                    } else {
+                        return .{
+                            .type = .bool_key,
+                            .hash = @as(u64, @intCast(0)),
+                        };
+                    }
+                },
+                .string => {
+                    const slice = key.data.string_type.ptr[0..key.data.string_type.len];
+                    const hash = std.hash.Wyhash.hash(0, slice);
+                    return .{
+                        .type = .string_key,
+                        .hash = hash,
+                    };
+                },
+                else => unreachable,
+            }
+        }
     };
 
     const FunctionExpression = extern struct {
@@ -406,6 +538,7 @@ pub const ObjectTypes = enum(u8) {
     boolean,
     string,
     array,
+    hash_map,
     return_expression,
     break_statement,
     continue_statement,

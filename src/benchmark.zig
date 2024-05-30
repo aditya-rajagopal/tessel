@@ -16,6 +16,19 @@ const tessel_fibonacci_35 =
     \\  fibonacci(35);
 ;
 
+// const tessel_fibonacci_35 =
+//     \\  const fibonacci = fn(x) {
+//     \\     const a = [0, 1];
+//     \\     var i = 1;
+//     \\     while (i < 35) {
+//     \\          append(a, a[i] + a[i-1]);
+//     \\          i = i + 1;
+//     \\     }
+//     \\     return a[i];
+//     \\  }
+//     \\  fibonacci(35);
+// ;
+
 fn fibonacci(x: u32) u32 {
     if (x == 0) {
         return 0;
@@ -36,11 +49,11 @@ pub fn main() !void {
     //     const deinit_status = gpa.deinit();
     //     if (deinit_status == .leak) @panic("MEMORY LEAK");
     // }
+    var timer = try std.time.Timer.start();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     var buffer: [1024]u8 = undefined;
-    var timer = try std.time.Timer.start();
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
     var eval = try Evaluator.init(allocator, global_env, &identifier_map);
@@ -54,13 +67,13 @@ pub fn main() !void {
     const output = try eval.evaluate_program(&ast, allocator, global_env);
 
     const outstr = try eval.object_pool.ToString(&buffer, output);
+    eval.object_pool.free(allocator, output);
+    eval.deinit(allocator);
     const end_time = timer.read();
     std.debug.print("Object Pool Capacity End {d}\n", .{eval.object_pool.object_pool.capacity});
     // eval.environment_pool.print_to_stderr();
     // try eval.object_pool.print_object_pool_to_stderr();
     std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ outstr, std.fmt.fmtDuration(end_time) });
-    eval.object_pool.free(allocator, output);
-    eval.deinit(allocator);
 }
 
 const lexer = @import("tessel/lexer.zig");

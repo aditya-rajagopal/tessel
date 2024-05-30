@@ -5,6 +5,7 @@ str: ObjectPool.BuiltInFn,
 int: ObjectPool.BuiltInFn,
 append: ObjectPool.BuiltInFn,
 pop: ObjectPool.BuiltInFn,
+get_keys: ObjectPool.BuiltInFn,
 
 pub const default = Builtins{
     .len = Builtins.len,
@@ -12,6 +13,7 @@ pub const default = Builtins{
     .int = Builtins.int,
     .append = Builtins.append,
     .pop = Builtins.pop,
+    .get_keys = Builtins.get_keys,
 };
 
 fn len(
@@ -270,6 +272,52 @@ fn pop(
     return null_object;
 }
 
+fn get_keys(
+    self: *Evaluator,
+    allocator: *const Allocator,
+    objects: [*]const ObjectIndex,
+    length: u32,
+) callconv(.C) ObjectIndex {
+    if (length != 1) {
+        const output = std.fmt.allocPrint(
+            allocator.*,
+            "Wrong number of arguments to builin function hash_keys. Expected atleast 1 got {d}",
+            .{length},
+        ) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
+        };
+        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+        };
+    }
+
+    const arg_tag = self.object_pool.get_tag(objects[0]);
+    const arg_data = self.object_pool.get_data(objects[0]);
+    if (arg_tag != .hash_map) {
+        const output = std.fmt.allocPrint(
+            allocator.*,
+            "Expected the first argument to be of type HASHMAP. Got {s}",
+            .{self.object_pool.get_tag_string(objects[0])},
+        ) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
+        };
+        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+        };
+    }
+
+    for (arg_data.hash_map.keys.items) |obj| {
+        self.object_pool.increase_ref(obj);
+    }
+    const array_storage = ObjectPool.InternalObject.ArrayType{
+        .data = arg_data.hash_map.keys.items,
+    };
+    const return_object = self.object_pool.create(allocator.*, .array, @ptrCast(&array_storage)) catch {
+        std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+    };
+
+    return return_object;
+}
 const Evaluator = @import("evaluator.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;

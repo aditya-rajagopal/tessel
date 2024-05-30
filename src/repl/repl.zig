@@ -32,7 +32,6 @@ pub fn start() !void {
     defer identifier_map.deinit(allocator);
 
     var eval = try Evaluator.init(allocator, global_env, &identifier_map);
-    defer eval.deinit(allocator);
 
     while (true) {
         try stdout.print("{s}", .{PROMT});
@@ -98,6 +97,7 @@ pub fn start() !void {
             }
             try bw.flush();
             eval.object_pool.free(allocator, output);
+            // try eval.object_pool.print_object_pool_to_stderr();
         }
     }
     eval.deinit(allocator);

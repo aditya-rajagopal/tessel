@@ -37,6 +37,7 @@ pub const TokenType = enum {
     RBRACE,
     LBRACKET,
     RBRACKET,
+    COLON,
 
     // Keywords
     FUNCTION,
