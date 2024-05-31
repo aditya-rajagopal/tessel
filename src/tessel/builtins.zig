@@ -6,6 +6,7 @@ int: ObjectPool.BuiltInFn,
 append: ObjectPool.BuiltInFn,
 pop: ObjectPool.BuiltInFn,
 get_keys: ObjectPool.BuiltInFn,
+print: ObjectPool.BuiltInFn,
 
 pub const default = Builtins{
     .len = Builtins.len,
@@ -14,10 +15,11 @@ pub const default = Builtins{
     .append = Builtins.append,
     .pop = Builtins.pop,
     .get_keys = Builtins.get_keys,
+    .print = Builtins.print,
 };
 
 fn len(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -30,23 +32,23 @@ fn len(
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .string => {
             const str_len: i64 = @as(i64, @intCast(arg_data.string_type.len));
-            return self.object_pool.create(allocator.*, .integer, @ptrCast(&str_len)) catch {
+            return eval.object_pool.create(allocator.*, .integer, @ptrCast(&str_len)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
         .array => {
             const array_len: i64 = @as(i64, @intCast(arg_data.array.items.len));
-            return self.object_pool.create(allocator.*, .integer, @ptrCast(&array_len)) catch {
+            return eval.object_pool.create(allocator.*, .integer, @ptrCast(&array_len)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -54,11 +56,11 @@ fn len(
             const output = std.fmt.allocPrint(
                 allocator.*,
                 "Argument of type: {s} is not supported by builtin 'len'",
-                .{self.object_pool.get_tag_string(objects[0])},
+                .{eval.object_pool.get_tag_string(objects[0])},
             ) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
             };
-            return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -67,7 +69,7 @@ fn len(
 }
 
 fn str(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -80,23 +82,23 @@ fn str(
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .string => {
-            self.object_pool.increase_ref(objects[0]);
+            eval.object_pool.increase_ref(objects[0]);
             return objects[0];
         },
         .integer => {
             const out_str = std.fmt.allocPrint(allocator.*, "{d}", .{arg_data.integer}) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
             };
-            return self.object_pool.create(allocator.*, .string, @ptrCast(&out_str)) catch {
+            return eval.object_pool.create(allocator.*, .string, @ptrCast(&out_str)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -104,11 +106,11 @@ fn str(
             const output = std.fmt.allocPrint(
                 allocator.*,
                 "Argument of type: {s} is not supported by builtin 'len'",
-                .{self.object_pool.get_tag_string(objects[0])},
+                .{eval.object_pool.get_tag_string(objects[0])},
             ) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
             };
-            return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -117,7 +119,7 @@ fn str(
 }
 
 fn int(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -130,13 +132,13 @@ fn int(
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .string => {
             const value = std.fmt.parseInt(i64, arg_data.string_type.ptr[0..arg_data.string_type.len], 10) catch {
@@ -147,27 +149,27 @@ fn int(
                 ) catch {
                     std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
                 };
-                return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+                return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                     std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
                 };
             };
-            return self.object_pool.create(allocator.*, .integer, @ptrCast(&value)) catch {
+            return eval.object_pool.create(allocator.*, .integer, @ptrCast(&value)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
         .integer => {
-            self.object_pool.increase_ref(objects[0]);
+            eval.object_pool.increase_ref(objects[0]);
             return objects[0];
         },
         else => {
             const output = std.fmt.allocPrint(
                 allocator.*,
-                "Argument of type: {s} is not supported by builtin 'len'",
-                .{self.object_pool.get_tag_string(objects[0])},
+                "Argument of type: {s} is not supported by builtin 'int'",
+                .{eval.object_pool.get_tag_string(objects[0])},
             ) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
             };
-            return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -176,7 +178,7 @@ fn int(
 }
 
 fn append(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -189,28 +191,28 @@ fn append(
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     if (arg_tag != .array) {
         const output = std.fmt.allocPrint(
             allocator.*,
             "Expected the first argument to be of type array. Got {s}",
-            .{self.object_pool.get_tag_string(objects[0])},
+            .{eval.object_pool.get_tag_string(objects[0])},
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
     for (1..length) |i| {
-        self.object_pool.increase_ref(objects[i]);
+        eval.object_pool.increase_ref(objects[i]);
         arg_data.array.append(allocator.*, objects[i]) catch {
             std.debug.panic("Something has gone horribly wrong. Ran out of memory", .{});
         };
@@ -220,7 +222,7 @@ fn append(
 }
 
 fn pop(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -233,13 +235,13 @@ fn pop(
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .array => {
             const out = arg_data.array.popOrNull() orelse {
@@ -250,7 +252,7 @@ fn pop(
                 ) catch {
                     std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
                 };
-                return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+                return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                     std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
                 };
             };
@@ -260,11 +262,11 @@ fn pop(
             const output = std.fmt.allocPrint(
                 allocator.*,
                 "Argument of type: {s} is not supported by builtin 'pop'. Expected ARRAY",
-                .{self.object_pool.get_tag_string(objects[0])},
+                .{eval.object_pool.get_tag_string(objects[0])},
             ) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
             };
-            return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
         },
@@ -273,7 +275,7 @@ fn pop(
 }
 
 fn get_keys(
-    self: *Evaluator,
+    eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
     length: u32,
@@ -281,43 +283,79 @@ fn get_keys(
     if (length != 1) {
         const output = std.fmt.allocPrint(
             allocator.*,
-            "Wrong number of arguments to builin function hash_keys. Expected atleast 1 got {d}",
+            "Wrong number of arguments to builin function hash_keys. Expected 1 got {d}",
             .{length},
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
-    const arg_tag = self.object_pool.get_tag(objects[0]);
-    const arg_data = self.object_pool.get_data(objects[0]);
+    const arg_tag = eval.object_pool.get_tag(objects[0]);
+    const arg_data = eval.object_pool.get_data(objects[0]);
     if (arg_tag != .hash_map) {
         const output = std.fmt.allocPrint(
             allocator.*,
             "Expected the first argument to be of type HASHMAP. Got {s}",
-            .{self.object_pool.get_tag_string(objects[0])},
+            .{eval.object_pool.get_tag_string(objects[0])},
         ) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
         };
-        return self.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
             std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
         };
     }
 
     for (arg_data.hash_map.keys.items) |obj| {
-        self.object_pool.increase_ref(obj);
+        eval.object_pool.increase_ref(obj);
     }
     const array_storage = ObjectPool.InternalObject.ArrayType{
         .data = arg_data.hash_map.keys.items,
     };
-    const return_object = self.object_pool.create(allocator.*, .array, @ptrCast(&array_storage)) catch {
+    const return_object = eval.object_pool.create(allocator.*, .array, @ptrCast(&array_storage)) catch {
         std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
     };
 
     return return_object;
 }
+
+fn print(
+    eval: *Evaluator,
+    allocator: *const Allocator,
+    objects: [*]const ObjectIndex,
+    length: u32,
+) callconv(.C) ObjectIndex {
+    if (length == 0) {
+        const output = std.fmt.allocPrint(
+            allocator.*,
+            "Wrong number of arguments to builin function print. Expected atleast 1 got {d}",
+            .{length},
+        ) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
+        };
+        return eval.object_pool.create(allocator.*, .runtime_error, @ptrCast(&output)) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+        };
+    }
+    var out = std.ArrayList(u8).init(allocator.*);
+    var buffer: [4096]u8 = undefined;
+    for (0..length) |i| {
+        out.appendSlice(eval.object_pool.ToString(&buffer, objects[i]) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+        }) catch {
+            std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+        };
+    }
+    const out_str = out.toOwnedSlice();
+
+    const return_object = eval.object_pool.create(allocator.*, .string, @ptrCast(&out_str)) catch {
+        std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
+    };
+    return return_object;
+}
+
 const Evaluator = @import("evaluator.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
