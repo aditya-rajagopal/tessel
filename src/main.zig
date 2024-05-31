@@ -56,7 +56,7 @@ pub fn main() !void {
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try eval.evaluate_program(&ast, allocator, global_env);
+    const output = try eval.evaluate_program(&ast, 0, allocator, global_env);
 
     const outstr = try eval.object_pool.ToString(&out_buffer, output);
     const end_time = timer.read();

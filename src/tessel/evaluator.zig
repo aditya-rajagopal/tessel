@@ -27,11 +27,11 @@ pub fn deinit(self: *Evaluator, allocator: Allocator) void {
     self.object_pool.deinit(allocator);
 }
 
-pub fn evaluate_program(self: *Evaluator, ast: *const Ast, allocator: Allocator, env: EnvironmentIndex) Error!ObjectIndex {
+pub fn evaluate_program(self: *Evaluator, ast: *const Ast, start: u32, allocator: Allocator, env: EnvironmentIndex) Error!ObjectIndex {
     const root_node = ast.nodes.get(0);
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
 
-    return self.evaluate_program_statements(ast, statements, allocator, env);
+    return self.evaluate_program_statements(ast, statements[start..], allocator, env);
 }
 
 fn evaluate_program_statements(
@@ -1771,7 +1771,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
 
-        const output = try eval.evaluate_program(&ast, testing.allocator, global_env);
+        const output = try eval.evaluate_program(&ast, 0, testing.allocator, global_env);
         const outstr = try eval.object_pool.ToString(&buffer, output);
         if (enable_debug_print) {
             std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });

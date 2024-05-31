@@ -80,7 +80,6 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, 
     try parser.nodes.ensureTotalCapacity(allocator, estimated_nodes);
 
     try parser.begin_parsing();
-
     return Ast{
         .source_buffer = source_buffer,
         .tokens = tokens_local.toOwnedSlice(), //

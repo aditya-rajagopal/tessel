@@ -27,7 +27,10 @@ pub fn start() !void {
 
     var buffer: [4096]u8 = undefined;
     var msg_buf: [10240]u8 = undefined;
-
+    var source_buffer = std.ArrayList(u8).init(allocator);
+    defer source_buffer.deinit();
+    try source_buffer.append(0);
+    var start_statement: u32 = 0;
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
 
@@ -49,46 +52,16 @@ pub fn start() !void {
                 try bw.flush();
                 break;
             }
-            var source_code = try allocator.alloc(u8, m.len + 1);
-            defer allocator.free(source_code);
-            @memcpy(source_code, m.ptr);
-            source_code[m.len] = 0;
+            _ = source_buffer.pop();
+            try source_buffer.appendSlice(m);
+            try source_buffer.append(0);
 
-            var ast = try Parser.parse_program(source_code[0..m.len :0], allocator, &identifier_map);
+            var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &identifier_map);
             defer ast.deinit(allocator);
 
-            // var outlist = std.ArrayList(u8).init(allocator);
-            // defer outlist.deinit();
-            //
-            // Evaluator.convert_ast_to_string(&ast, 1, &outlist) catch |err| switch (err) {
-            //     Evaluator.Error.ReferencingNodeZero => {
-            //         std.debug.print(
-            //             "Error parsing AST to string: Encountered an endless loop in AST where the lhs of one of the statements is 0\n",
-            //             .{},
-            //         );
-            //     },
-            //     else => |overflow| return overflow,
-            // };
-            //
-            // outlist.shrinkRetainingCapacity(outlist.items.len);
-            // try stdout.print("{s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
-            // for (0..ast.nodes.len) |i| {
-            //     const n = ast.nodes.get(i);
-            //     try stdout.print("Nodes({d}): {any}\r\n", .{ i, n });
-            // }
-            //
-            // try stdout.print("Extra Data: ", .{});
-            // for (0..ast.extra_data.len) |i| {
-            //     const n = ast.extra_data[i];
-            //     try stdout.print("{}, ", .{n});
-            // }
-            //
-            // try stdout.print("\n", .{});
-            // try bw.flush();
-
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
-            // identifier_map.print_env_hashmap_stderr();
-            const output = try eval.evaluate_program(&ast, allocator, global_env);
+
+            const output = try eval.evaluate_program(&ast, start_statement, allocator, global_env);
             const outstr = try eval.object_pool.ToString(&buffer, output);
             const tag = eval.object_pool.get_tag(output);
             switch (tag) {
@@ -97,7 +70,7 @@ pub fn start() !void {
             }
             try bw.flush();
             eval.object_pool.free(allocator, output);
-            // try eval.object_pool.print_object_pool_to_stderr();
+            start_statement = ast.nodes.get(0).node_data.rhs - ast.nodes.get(0).node_data.lhs;
         }
     }
     eval.deinit(allocator);
