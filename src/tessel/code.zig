@@ -112,12 +112,34 @@ fn format_instruction(def: []const u8, operands: []u32, buffer: *std.ArrayList(u
 pub const Opcode = enum(u8) {
     load_const,
     add,
+    sub,
+    mul,
+    div,
+    neg,
+    geq,
+    gt,
+    not,
+    eq,
+    neq,
+    ltrue,
+    lfalse,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
     // We are limiting the number of possible constants to be around 2^16 - 1.
     .load_const = &[_]u8{2},
     .add = &[_]u8{0},
+    .sub = &[_]u8{0},
+    .mul = &[_]u8{0},
+    .div = &[_]u8{0},
+    .neg = &[_]u8{0},
+    .geq = &[_]u8{0},
+    .gt = &[_]u8{0},
+    .not = &[_]u8{0},
+    .eq = &[_]u8{0},
+    .neq = &[_]u8{0},
+    .lfalse = &[_]u8{0},
+    .ltrue = &[_]u8{0},
 });
 
 test "test_definitions" {
@@ -160,12 +182,34 @@ test "make instructions string" {
     try make(&insts, .load_const, &[_]u32{2});
     try make(&insts, .load_const, &[_]u32{65534});
     try make(&insts, .add, &[_]u32{});
+    try make(&insts, .sub, &[_]u32{});
+    try make(&insts, .mul, &[_]u32{});
+    try make(&insts, .div, &[_]u32{});
+    try make(&insts, .geq, &[_]u32{});
+    try make(&insts, .gt, &[_]u32{});
+    try make(&insts, .not, &[_]u32{});
+    try make(&insts, .eq, &[_]u32{});
+    try make(&insts, .neg, &[_]u32{});
+    try make(&insts, .ltrue, &[_]u32{});
+    try make(&insts, .lfalse, &[_]u32{});
+    try make(&insts, .neq, &[_]u32{});
 
     const expected_str =
         \\0000 load_const 1
         \\0003 load_const 2
         \\0006 load_const 65534
         \\0009 add
+        \\0010 sub
+        \\0011 mul
+        \\0012 div
+        \\0013 geq
+        \\0014 gt
+        \\0015 not
+        \\0016 eq
+        \\0017 neg
+        \\0018 ltrue
+        \\0019 lfalse
+        \\0020 neq
         \\
     ;
 
@@ -187,6 +231,11 @@ test "code_read_ops" {
         },
         .{
             .op = .add,
+            .operands = &[_]u32{},
+            .bytes_to_read = 0,
+        },
+        .{
+            .op = .neg,
             .operands = &[_]u32{},
             .bytes_to_read = 0,
         },

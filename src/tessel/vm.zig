@@ -40,7 +40,19 @@ pub fn run(self: *VM) !void {
                 index += 2;
                 try self.stack_push(self.constants.get(obj_index));
             },
-            .add => {
+            .ltrue => {
+                try self.stack_push(self.constants.get(ObjectPool.true_object));
+            },
+            .lfalse => {
+                try self.stack_push(self.constants.get(ObjectPool.false_object));
+            },
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .geq,
+            .gt,
+            => {
                 const right = self.stack_pop();
                 const right_tag = right.tag;
                 const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
@@ -50,13 +62,127 @@ pub fn run(self: *VM) !void {
                 }
                 switch (left_tag) {
                     .integer => {
-                        self.stack.items(.data)[sptr - 1].integer += right.data.integer;
+                        try self.eval_int_infix(op, right.data.integer);
+                    },
+                    else => return VMError.TypeMismatch,
+                }
+            },
+            .neq, .eq => {
+                try self.eval_eq(op);
+            },
+            .neg => {
+                const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+                const left_tag = self.stack.items(.tag)[sptr - 1];
+                if (left_tag != .integer) {
+                    return VMError.TypeMismatch;
+                }
+                self.stack.items(.data)[sptr - 1].integer *= -1;
+            },
+            .not => {
+                const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+                const left_tag = self.stack.items(.tag)[sptr - 1];
+                switch (left_tag) {
+                    .integer => {
+                        const lhs = self.stack.items(.data)[sptr - 1].integer;
+                        self.stack.items(.tag)[sptr - 1] = .boolean;
+                        self.stack.items(.data)[sptr - 1].boolean = lhs == 0;
+                    },
+                    .boolean => {
+                        self.stack.items(.data)[sptr - 1].boolean = !self.stack.items(.data)[sptr - 1].boolean;
                     },
                     else => return VMError.TypeMismatch,
                 }
             },
         }
         index += 1;
+    }
+}
+
+fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
+    const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+    switch (op) {
+        .add => {
+            self.stack.items(.data)[sptr - 1].integer += rhs;
+        },
+        .sub => {
+            self.stack.items(.data)[sptr - 1].integer -= rhs;
+        },
+        .mul => {
+            self.stack.items(.data)[sptr - 1].integer *= rhs;
+        },
+        .div => {
+            const lhs = self.stack.items(.data)[sptr - 1].integer;
+            self.stack.items(.data)[sptr - 1].integer = @divFloor(lhs, rhs);
+        },
+        .gt => {
+            const lhs = self.stack.items(.data)[sptr - 1].integer;
+            self.stack.items(.tag)[sptr - 1] = .boolean;
+            self.stack.items(.data)[sptr - 1].boolean = lhs > rhs;
+        },
+        .geq => {
+            const lhs = self.stack.items(.data)[sptr - 1].integer;
+            self.stack.items(.tag)[sptr - 1] = .boolean;
+            self.stack.items(.data)[sptr - 1].boolean = lhs >= rhs;
+        },
+        else => unreachable,
+    }
+}
+
+fn eval_eq(self: *VM, op: Code.Opcode) !void {
+    const right = self.stack_pop();
+    const right_tag = right.tag;
+    const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+    const left_tag = self.stack.items(.tag)[sptr - 1];
+    if (left_tag == .integer and right_tag == .integer) {
+        const lhs = self.stack.items(.data)[sptr - 1].integer;
+        self.stack.items(.tag)[sptr - 1] = .boolean;
+        switch (op) {
+            .eq => self.stack.items(.data)[sptr - 1].boolean = lhs == right.data.integer,
+            .neq => self.stack.items(.data)[sptr - 1].boolean = lhs != right.data.integer,
+            else => unreachable,
+        }
+        return;
+    }
+
+    const left_bool = switch (left_tag) {
+        .integer => self.stack.items(.data)[sptr - 1].integer != 0,
+        .boolean => self.stack.items(.data)[sptr - 1].boolean,
+        else => {
+            // const outstr = try std.fmt.allocPrint(
+            //     allocator,
+            //     "Unknown Operation: <{s}> {s} <{s}>",
+            //     .{
+            //         self.object_pool.get_tag_string(left),
+            //         get_token_literal(ast, node.main_token),
+            //         self.object_pool.get_tag_string(right),
+            //     },
+            // );
+            // return self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+            return VMError.TypeMismatch;
+        },
+    };
+    const right_bool = switch (right_tag) {
+        .integer => right.data.integer != 0,
+        .boolean => right.data.boolean,
+        else => {
+            // const outstr = try std.fmt.allocPrint(
+            //     allocator,
+            //     "Unknown Operation: <{s}> {s} <{s}>",
+            //     .{
+            //         self.object_pool.get_tag_string(left),
+            //         get_token_literal(ast, node.main_token),
+            //         self.object_pool.get_tag_string(right),
+            //     },
+            // );
+            // return self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
+            return VMError.TypeMismatch;
+        },
+    };
+    self.stack.items(.tag)[sptr - 1] = .boolean;
+    switch (op) {
+        .eq => self.stack.items(.data)[sptr - 1].boolean = left_bool == right_bool,
+        .neq => self.stack.items(.data)[sptr - 1].boolean = left_bool != right_bool,
+        else => unreachable,
     }
 }
 
@@ -101,40 +227,77 @@ test "vm_init" {
 
 const VMTestCase = struct {
     source: [:0]const u8,
-    expected: ObjectPool.InternalObject,
+    expected: []const u8,
 };
 
 test "vm_test_arithmetic" {
     const tests = [_]VMTestCase{
+        .{ .source = "5", .expected = "5" },
+        .{ .source = "10", .expected = "10" },
+        .{ .source = "-5", .expected = "-5" },
+        .{ .source = "-10", .expected = "-10" },
+        .{ .source = "5 + 5 + 5 + 5 - 10", .expected = "10" },
+        .{ .source = "2 * 2 * 2 * 2 * 2", .expected = "32" },
+        .{ .source = "-50 + 100 + -50", .expected = "0" },
+        .{ .source = "5 * 2 + 10", .expected = "20" },
+        .{ .source = "5 + 2 * 10", .expected = "25" },
+        .{ .source = "20 + 2 * -10", .expected = "0" },
+        .{ .source = "50 / 2 * 2 + 10", .expected = "60" },
+        .{ .source = "2 * (5 + 10)", .expected = "30" },
+        .{ .source = "3 * 3 * 3 + 10", .expected = "37" },
+        .{ .source = "3 * (3 * 3) + 10", .expected = "37" },
+        .{ .source = "(5 + 10 * 2 + 15 / 3) * 2 + -10", .expected = "50" },
+    };
+
+    try run_vm_tests(&tests);
+}
+
+test "run_bool_tests" {
+    const tests = [_]VMTestCase{
+        .{ .source = "true", .expected = "true" },
+        .{ .source = "false", .expected = "false" },
+        .{ .source = "1 < 2", .expected = "true" },
+        .{ .source = "1 > 2", .expected = "false" },
+        .{ .source = "1 < 1", .expected = "false" },
+        .{ .source = "1 > 1", .expected = "false" },
+        .{ .source = "1 == 1", .expected = "true" },
+        .{ .source = "1 != 1", .expected = "false" },
+        .{ .source = "1 == 2", .expected = "false" },
+        .{ .source = "1 != 2", .expected = "true" },
+        .{ .source = "true == true", .expected = "true" },
+        .{ .source = "false == false", .expected = "true" },
+        .{ .source = "true == false", .expected = "false" },
+        .{ .source = "true != false", .expected = "true" },
+        .{ .source = "false != true", .expected = "true" },
+        .{ .source = "(1 < 2) == true", .expected = "true" },
+        .{ .source = "(1 < 2) == false", .expected = "false" },
+        .{ .source = "(1 > 2) == true", .expected = "false" },
+        .{ .source = "(1 > 2) == false", .expected = "true" },
+    };
+    try run_vm_tests(&tests);
+}
+
+test "run_prefix_not" {
+    const tests = [_]VMTestCase{
         .{
-            .source = "1",
-            .expected = ObjectPool.InternalObject{
-                .tag = .integer,
-                .data = .{
-                    .integer = 1,
-                },
-                .refs = 0,
-            },
+            .source = "!5",
+            .expected = "false",
         },
         .{
-            .source = "2",
-            .expected = ObjectPool.InternalObject{
-                .tag = .integer,
-                .data = .{
-                    .integer = 2,
-                },
-                .refs = 0,
-            },
+            .source = "!false",
+            .expected = "true",
         },
         .{
-            .source = "1 + 2",
-            .expected = ObjectPool.InternalObject{
-                .tag = .integer,
-                .data = .{
-                    .integer = 3,
-                },
-                .refs = 0,
-            },
+            .source = "!!true",
+            .expected = "true",
+        },
+        .{
+            .source = "!!5",
+            .expected = "true",
+        },
+        .{
+            .source = "!!!5",
+            .expected = "false",
         },
     };
 
@@ -142,6 +305,7 @@ test "vm_test_arithmetic" {
 }
 
 fn run_vm_tests(tests: []const VMTestCase) !void {
+    var buffer: [2048]u8 = undefined;
     for (tests) |t| {
         var identifier_map = IdentifierMap.init();
         defer identifier_map.deinit(testing.allocator);
@@ -157,13 +321,9 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
 
         const sptr = vm.stack_top() orelse return VMError.AccessingEmptyStack;
         const object = vm.stack.get(sptr - 1);
-        try testing.expectEqual(t.expected.tag, object.tag);
-        switch (t.expected.tag) {
-            .integer => {
-                try testing.expectEqual(t.expected.data.integer, object.data.integer);
-            },
-            else => unreachable,
-        }
+
+        const outstr = try ObjectPool.ObjectToString(object, &buffer);
+        try testing.expectEqualSlices(u8, t.expected, outstr);
     }
 }
 

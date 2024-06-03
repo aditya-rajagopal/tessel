@@ -28,12 +28,12 @@ pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
 }
 
 fn compile_program_statements(self: *Compiler, ast: *const Ast, statements: []u32) !void {
-    for (statements) |s| {
-        try self.compile_statement(ast, s);
+    for (statements, 0..) |s, i| {
+        try self.compile_statement(ast, s, statements.len - 1 - i == 0);
     }
 }
 
-fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) !void {
+fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex, is_last: bool) !void {
     if (node >= ast.nodes.len) {
         return Error.IllegalAstNodeReference;
     }
@@ -45,7 +45,11 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex)
     const ast_node = ast.nodes.get(node);
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
-            return self.eval_expression(ast, ast_node.node_data.lhs);
+            if (is_last) {
+                return self.eval_expression(ast, ast_node.node_data.lhs);
+            } else {
+                return;
+            }
         },
         else => unreachable,
     }
@@ -70,9 +74,14 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) !
             );
             try self.emit(.load_const, &[_]u32{obj});
         },
-        .LESS_THAN,
+        .BOOLEAN_LITERAL => {
+            if (ast_node.node_data.lhs == 1) {
+                try self.emit(.ltrue, &[_]u32{});
+            } else {
+                try self.emit(.lfalse, &[_]u32{});
+            }
+        },
         .GREATER_THAN,
-        .LESS_THAN_EQUAL,
         .GREATER_THAN_EQUAL,
         .ADDITION,
         .SUBTRACTION,
@@ -83,22 +92,55 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) !
             try self.eval_expression(ast, ast_node.node_data.rhs);
             try self.emit_infix_op(ast_node.tag);
         },
+        .LESS_THAN,
+        .LESS_THAN_EQUAL,
+        => {
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.emit_infix_op(ast_node.tag);
+        },
+        .NOT_EQUAL => {
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.emit(.neq, &[_]u32{});
+        },
+        .DOUBLE_EQUAL => {
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.emit(.eq, &[_]u32{});
+        },
+        .BOOL_NOT => {
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.emit(.not, &[_]u32{});
+        },
+        .NEGATION => {
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.emit(.neg, &[_]u32{});
+        },
         else => unreachable,
     }
 }
 
 fn emit_infix_op(self: *Compiler, tag: Ast.Node.Tag) !void {
     switch (tag) {
-        .LESS_THAN => {},
-        .GREATER_THAN => {},
-        .LESS_THAN_EQUAL => {},
-        .GREATER_THAN_EQUAL => {},
+        .GREATER_THAN, .LESS_THAN => {
+            try self.emit(.gt, &[_]u32{});
+        },
+        .LESS_THAN_EQUAL, .GREATER_THAN_EQUAL => {
+            try self.emit(.gt, &[_]u32{});
+        },
         .ADDITION => {
             try self.emit(.add, &[_]u32{});
         },
-        .SUBTRACTION => {},
-        .MULTIPLY => {},
-        .DIVIDE => {},
+        .SUBTRACTION => {
+            try self.emit(.sub, &[_]u32{});
+        },
+        .MULTIPLY => {
+            try self.emit(.mul, &[_]u32{});
+        },
+        .DIVIDE => {
+            try self.emit(.div, &[_]u32{});
+        },
         else => unreachable,
     }
 }
@@ -124,7 +166,7 @@ const CompilerTest = struct {
 test "test_arithmatic_compile" {
     const tests = [_]CompilerTest{
         .{
-            .source = "1 + 2",
+            .source = "1 + 2; 1 + 2",
             .expected_instructions = &[_]u8{ 0, 5, 0, 0, 6, 0, 1 },
             .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
                 .integer,
@@ -133,6 +175,70 @@ test "test_arithmatic_compile" {
             .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
                 .{ .integer = 1 },
                 .{ .integer = 2 },
+            },
+        },
+        .{
+            .source = "true",
+            .expected_instructions = &[_]u8{11},
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
+        },
+        .{
+            .source = "false",
+            .expected_instructions = &[_]u8{12},
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
+        },
+        .{
+            .source = "1 - 2",
+            .expected_instructions = &[_]u8{ 0, 5, 0, 0, 6, 0, 2 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 1 },
+                .{ .integer = 2 },
+            },
+        },
+        .{
+            .source = "true == true",
+            .expected_instructions = &[_]u8{ 11, 11, 9 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
+        },
+        .{
+            .source = "1 * 2",
+            .expected_instructions = &[_]u8{ 0, 5, 0, 0, 6, 0, 3 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 1 },
+                .{ .integer = 2 },
+            },
+        },
+        .{
+            .source = "1 < 2",
+            .expected_instructions = &[_]u8{ 0, 5, 0, 0, 6, 0, 7 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 2 },
+                .{ .integer = 1 },
+            },
+        },
+        .{
+            .source = "!!-5",
+            .expected_instructions = &[_]u8{ 0, 5, 0, 5, 8, 8 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 5 },
             },
         },
     };
@@ -188,4 +294,9 @@ const Parser = @import("parser.zig");
 const IdentifierMap = @import("identifier_map.zig");
 const ObjectTypes = ObjectPool.ObjectTypes;
 const ObjectIndex = ObjectPool.ObjectIndex;
+const null_object = ObjectPool.null_object;
+const true_object = ObjectPool.true_object;
+const false_object = ObjectPool.false_object;
+const break_object = ObjectPool.break_object;
+const continue_object = ObjectPool.continue_object;
 const ByteCode = @import("byte_code.zig");

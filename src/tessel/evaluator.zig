@@ -1306,7 +1306,7 @@ fn eval_intboolean_infix_operation(
                 return self.object_pool.create(allocator, .runtime_error, @ptrCast(&outstr));
             },
         };
-        const right_bool = switch (left_tag) {
+        const right_bool = switch (right_tag) {
             .integer => right_data.integer != 0,
             .boolean => right_data.boolean,
             else => {

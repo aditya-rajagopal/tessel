@@ -5,4 +5,7 @@ comptime {
     _ = @import("tessel/evaluator.zig");
     _ = @import("tessel/environment.zig");
     _ = @import("tessel/object.zig");
+    _ = @import("tessel/vm.zig");
+    _ = @import("tessel/compiler.zig");
+    _ = @import("tessel/code.zig");
 }

@@ -76,6 +76,8 @@ pub fn start(use_vm: bool) !void {
                     try stdout.print("Error running code. Stack empty", .{});
                     continue;
                 };
+
+                try stdout.print("{d}\n", .{vm.instructions});
                 const outstr = try object.ObjectToString(vm.stack.get(sptr - 1), &buffer);
                 try stdout.print("Output >> {s}\n", .{outstr});
             } else {
