@@ -7,7 +7,7 @@ const EXIT = "exit()";
 // const CLEAR = "clear()";
 
 /// Function that starts the REPL. It creates a stdout/in reader/writer and connects the the lexer
-pub fn start() !void {
+pub fn start(use_vm: bool) !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
@@ -55,21 +55,40 @@ pub fn start() !void {
             _ = source_buffer.pop();
             try source_buffer.appendSlice(m);
             try source_buffer.append(0);
+            var compiler = try Compiler.init(allocator);
+            defer compiler.deinit(allocator);
 
             var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &identifier_map);
             defer ast.deinit(allocator);
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            try compiler.compile(&ast, start_statement);
+            const byte_code = try compiler.get_byte_code();
+            var vm = try VM.init(byte_code, allocator);
+            defer vm.deinit();
+            if (use_vm) {
+                const out = try Code.code_to_str(allocator, byte_code.instructions);
+                defer allocator.free(out);
+                try stdout.print("{s}", .{out});
+                try vm.run();
 
-            const output = try eval.evaluate_program(&ast, start_statement, allocator, global_env);
-            const outstr = try eval.object_pool.ToString(&buffer, output);
-            const tag = eval.object_pool.get_tag(output);
-            switch (tag) {
-                .null => {},
-                else => try stdout.print("Output >> {s}\n", .{outstr}),
+                const sptr = vm.stack_top() orelse {
+                    try stdout.print("Error running code. Stack empty", .{});
+                    continue;
+                };
+                const outstr = try object.ObjectToString(vm.stack.get(sptr - 1), &buffer);
+                try stdout.print("Output >> {s}\n", .{outstr});
+            } else {
+                const output = try eval.evaluate_program(&ast, start_statement, allocator, global_env);
+                const outstr = try eval.object_pool.ToString(&buffer, output);
+                const tag = eval.object_pool.get_tag(output);
+                switch (tag) {
+                    .null => {},
+                    else => try stdout.print("Output >> {s}\n", .{outstr}),
+                }
+                eval.object_pool.free(allocator, output);
             }
             try bw.flush();
-            eval.object_pool.free(allocator, output);
             start_statement = ast.nodes.get(0).node_data.rhs - ast.nodes.get(0).node_data.lhs;
         }
     }
@@ -93,3 +112,6 @@ const object = @import("../tessel/object.zig");
 const Environment = @import("../tessel/environment.zig");
 const IdentifierMap = @import("../tessel/identifier_map.zig");
 const global_env = @import("../tessel/environment_pool.zig").global_env;
+const Compiler = @import("../tessel/compiler.zig");
+const Code = @import("../tessel/code.zig");
+const VM = @import("../tessel/vm.zig");

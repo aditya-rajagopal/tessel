@@ -345,6 +345,32 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
     }
 }
 
+pub fn ObjectToString(obj: InternalObject, buffer: []u8) ![]const u8 {
+    switch (obj.tag) {
+        .integer => return std.fmt.bufPrint(buffer, "{d}", .{obj.data.integer}),
+        .boolean => if (obj.data.boolean) {
+            return std.fmt.bufPrint(buffer, "true", .{});
+        } else {
+            return std.fmt.bufPrint(buffer, "false", .{});
+        },
+        .string => {
+            const data = obj.data.string_type;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .runtime_error => {
+            const data = obj.data.runtime_error;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .null => return std.fmt.bufPrint(buffer, "null", .{}),
+        .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        .builtin => unreachable,
+        .return_expression => unreachable,
+        .break_statement => return std.fmt.bufPrint(buffer, "break", .{}),
+        .continue_statement => return std.fmt.bufPrint(buffer, "continue", .{}),
+        else => return std.fmt.bufPrint(buffer, "null", .{}),
+    }
+}
+
 pub fn get_tag_string(self: *ObjectPool, position: ObjectIndex) []const u8 {
     std.debug.assert(position <= self.object_pool.len);
     const tag = self.object_pool.items(.tag)[position];
