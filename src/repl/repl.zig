@@ -54,10 +54,14 @@ pub fn start(use_vm: bool) !void {
             }
             _ = source_buffer.pop();
             try source_buffer.appendSlice(m);
+            try source_buffer.append('\n');
             try source_buffer.append(0);
             var compiler = try Compiler.init(allocator);
             defer compiler.deinit(allocator);
 
+            try bw.flush();
+            try stdout.print("\n", .{});
+            try bw.flush();
             var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &identifier_map);
             defer ast.deinit(allocator);
 

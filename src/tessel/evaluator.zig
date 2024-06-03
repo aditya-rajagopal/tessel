@@ -1457,6 +1457,7 @@ test "evaluate_booleans" {
         .{ .source = "1 != 1", .output = "false" },
         .{ .source = "1 == 2", .output = "false" },
         .{ .source = "1 != 2", .output = "true" },
+        .{ .source = "1 != true", .output = "false" },
         .{ .source = "true == true", .output = "true" },
         .{ .source = "false == false", .output = "true" },
         .{ .source = "true == false", .output = "false" },

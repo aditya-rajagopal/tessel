@@ -380,10 +380,18 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
         const operator_token = self.next_token();
 
         if (self.token_tags[operator_token] == .LPAREN) {
+            if (self.nodes.get(cur_node).tag != .IDENTIFIER and self.nodes.get(cur_node).tag != .FUNCTION_EXPRESSION and self.nodes.get(cur_node).tag != .INDEX_INTO) {
+                self.token_current -= 1;
+                break;
+            }
             cur_node = try self.parse_function_call(cur_node, operator_token);
             continue;
         }
         if (self.token_tags[operator_token] == .LBRACKET) {
+            if (self.nodes.get(cur_node).tag != .IDENTIFIER and self.nodes.get(cur_node).tag != .ARRAY_LITERAL and self.nodes.get(cur_node).tag != .STRING_LITERAL and self.nodes.get(cur_node).tag != .HASH_LITERAL) {
+                self.token_current -= 1;
+                break;
+            }
             cur_node = try self.parse_index_into(cur_node, operator_token);
             continue;
         }
