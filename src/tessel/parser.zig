@@ -4,7 +4,7 @@ pub const Parser = @This();
 source_buffer: [:0]const u8,
 /// The allocator to be used in all internal allocations
 allocator: std.mem.Allocator,
-map: *IdentifierMap,
+map: *SymbolTable,
 /// List of token types for each array. Seperated here for ease of access
 /// so that we dont have to get a Token struct out of a multiArray every time
 token_tags: []const token.TokenType,
@@ -44,7 +44,7 @@ pub const null_node: Ast.Node.NodeIndex = 0;
 
 pub const Error = error{ParsingError} || Allocator.Error;
 
-pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, map: *IdentifierMap) !Ast {
+pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, map: *SymbolTable) !Ast {
     std.debug.assert(source_buffer.len > 0);
 
     var tokens_local = Ast.TokenArrayType{};
@@ -235,7 +235,7 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
         .tag = .IDENTIFIER,
         .main_token = ident_token,
         .node_data = .{
-            .lhs = hash,
+            .lhs = hash.index,
             .rhs = 0,
         },
     });
@@ -260,7 +260,7 @@ fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
-                .lhs = hash, //
+                .lhs = hash.index, //
                 .rhs = 0,
             },
         });
@@ -459,7 +459,7 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
                 .tag = .IDENTIFIER, //
                 .main_token = self.next_token(),
                 .node_data = .{
-                    .lhs = hash,
+                    .lhs = hash.index,
                     .rhs = 0,
                 },
             });
@@ -679,7 +679,7 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
             .tag = .IDENTIFIER, //
             .main_token = next_tok,
             .node_data = .{
-                .lhs = hash, //
+                .lhs = hash.index, //
                 .rhs = 0,
             },
         });
@@ -1008,7 +1008,7 @@ pub fn print_parser_errors_to_stderr(ast: *const Ast) !void {
 test "parser_initialization_test_only_root_node" {
     const input = "\n";
 
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1025,7 +1025,7 @@ test "parser_test_var_decl" {
         \\ const c = false;
     ;
 
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1111,7 +1111,7 @@ test "parse_test_var_decl_errors" {
         \\ const b = ;
     ;
 
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1162,7 +1162,7 @@ test "parser_test_return_stmt" {
         \\ return a;
     ;
 
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1228,7 +1228,7 @@ test "parser_test_assignement_stmt" {
         \\ b = fn(c) { c }
     ;
 
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1302,7 +1302,7 @@ test "parser_test_assignement_stmt" {
 }
 test "parser_test_identifer" {
     const input = "foobar;";
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1341,7 +1341,7 @@ test "parser_test_identifer" {
 
 test "parser_test_int_literal" {
     const input = "15;";
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
 
@@ -1384,7 +1384,7 @@ test "parser_test_prefix_operators" {
         \\!15;
         \\-25;
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1550,7 +1550,7 @@ test "parser_test_infix_operators" {
     };
     for (tests, 0..) |t, i| {
         _ = i;
-        var identifier_map = IdentifierMap.init();
+        var identifier_map = SymbolTable.init();
         defer identifier_map.deinit(testing.allocator);
         var ast = try Parser.parse_program(t.input, testing.allocator, &identifier_map);
         defer ast.deinit(testing.allocator);
@@ -1574,7 +1574,7 @@ test "parser_test_if_else_block" {
         \\      var b = 15;
         \\ };
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1690,7 +1690,7 @@ test "parser_test_naked_if" {
         \\      var b = 10;
         \\ };
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1781,7 +1781,7 @@ test "parser_array_expression" {
     const input =
         \\[1 , "two", three][1 * 2]
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1866,7 +1866,7 @@ test "parser_test_function_expression" {
         \\    return a + b;
         \\ }
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -1958,7 +1958,7 @@ test "parser_test_function_empty_param" {
         \\    return 10;
         \\ }
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -2018,7 +2018,7 @@ test "parser_test_function_call_expr" {
     const input =
         \\ a(1, 2, b(3, 4));
     ;
-    var identifier_map = IdentifierMap.init();
+    var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
     defer ast.deinit(testing.allocator);
@@ -2140,4 +2140,4 @@ const Ast = @import("ast.zig");
 const token = @import("token.zig");
 const Allocator = std.mem.Allocator;
 const convert_ast_to_string = @import("evaluator.zig").convert_ast_to_string;
-const IdentifierMap = @import("identifier_map.zig");
+const SymbolTable = @import("symbol_table.zig");

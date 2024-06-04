@@ -33,6 +33,7 @@ pub fn run(self: *VM) !void {
     var index: usize = 0;
     while (index < self.instructions.len) {
         const op: Code.Opcode = @enumFromInt(self.instructions[index]);
+        // std.debug.print("Index: {d} op:{s}\n", .{ index, @tagName(op) });
 
         switch (op) {
             .load_const => {
@@ -45,6 +46,9 @@ pub fn run(self: *VM) !void {
             },
             .lfalse => {
                 try self.stack_push(self.constants.get(ObjectPool.false_object));
+            },
+            .lnull => {
+                try self.stack_push(self.constants.get(ObjectPool.null_object));
             },
             .add,
             .sub,
@@ -91,6 +95,33 @@ pub fn run(self: *VM) !void {
                         self.stack.items(.data)[sptr - 1].boolean = !self.stack.items(.data)[sptr - 1].boolean;
                     },
                     else => return VMError.TypeMismatch,
+                }
+            },
+            .jmp => {
+                const destination = std.mem.bytesToValue(u16, self.instructions[index + 1 ..]);
+                index = destination;
+                continue;
+            },
+            .jn => {
+                const right = self.stack_pop();
+                const right_tag = right.tag;
+                if (right_tag != .integer and right_tag != .boolean) {
+                    return VMError.TypeMismatch;
+                }
+
+                const condition = switch (right_tag) {
+                    .integer => right.data.integer != 0,
+                    .boolean => right.data.boolean,
+                    else => unreachable,
+                };
+
+                if (condition) {
+                    index += 5;
+                    continue;
+                } else {
+                    const destination = std.mem.bytesToValue(u16, self.instructions[index + 1 ..]);
+                    index = destination;
+                    continue;
                 }
             },
         }
@@ -209,13 +240,13 @@ pub fn stack_top(self: *VM) ?usize {
 test "vm_init" {
     const source: [:0]const u8 = "1 + 2";
 
-    var identifier_map = IdentifierMap.init();
-    defer identifier_map.deinit(testing.allocator);
+    var symbol_table = SymbolTable.init();
+    defer symbol_table.deinit(testing.allocator);
 
-    var compiler = try Compiler.init(testing.allocator);
+    var compiler = try Compiler.init(testing.allocator, &symbol_table);
     defer compiler.deinit(testing.allocator);
 
-    var ast = try Parser.parse_program(source, testing.allocator, &identifier_map);
+    var ast = try Parser.parse_program(source, testing.allocator, &symbol_table);
     defer ast.deinit(testing.allocator);
 
     try compiler.compile(&ast, 0);
@@ -277,6 +308,22 @@ test "run_bool_tests" {
     try run_vm_tests(&tests);
 }
 
+test "run_if_expressions" {
+    const tests = [_]VMTestCase{
+        .{ .source = "if (true) { 10 }", .expected = "10" },
+        .{ .source = "if (false) { 10 }", .expected = "null" },
+        .{ .source = "if (1) { 10 }", .expected = "10" },
+        .{ .source = "if (1 < 2) { 10 }", .expected = "10" },
+        .{ .source = "if (1 > 2) { 10 }", .expected = "null" },
+        .{ .source = "if (1 > 2) { 10 } else { 20 }", .expected = "20" },
+        .{ .source = "if (1 < 2) { 10 } else { 20 }", .expected = "10" },
+        // .{ .source = "if (1 < 2) { if(1 < 2) { return 10; } return 1; } else { 20 }", .expected = "10" },
+        .{ .source = "if (1 < 2) { if ( 3 < 2 ) { 30 } else{ if (1 < 2 * 5 + 3) { 10 } }} else { 20 }", .expected = "10" },
+    };
+
+    try run_vm_tests(&tests);
+}
+
 test "run_prefix_not" {
     const tests = [_]VMTestCase{
         .{
@@ -307,11 +354,11 @@ test "run_prefix_not" {
 fn run_vm_tests(tests: []const VMTestCase) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {
-        var identifier_map = IdentifierMap.init();
-        defer identifier_map.deinit(testing.allocator);
-        var compiler = try Compiler.init(testing.allocator);
+        var symbol_table = SymbolTable.init();
+        defer symbol_table.deinit(testing.allocator);
+        var compiler = try Compiler.init(testing.allocator, &symbol_table);
         defer compiler.deinit(testing.allocator);
-        var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
+        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
         try compiler.compile(&ast, 0);
         const byte_code: ByteCode = try compiler.get_byte_code();
@@ -319,11 +366,14 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
         defer vm.deinit();
         try vm.run();
 
-        const sptr = vm.stack_top() orelse return VMError.AccessingEmptyStack;
-        const object = vm.stack.get(sptr - 1);
+        if (vm.stack_top()) |sptr| {
+            const object = vm.stack.get(sptr - 1);
 
-        const outstr = try ObjectPool.ObjectToString(object, &buffer);
-        try testing.expectEqualSlices(u8, t.expected, outstr);
+            const outstr = try ObjectPool.ObjectToString(object, &buffer);
+            try testing.expectEqualSlices(u8, t.expected, outstr);
+        } else {
+            try testing.expectEqualSlices(u8, t.expected, "Error! stack empty");
+        }
     }
 }
 
@@ -335,7 +385,7 @@ const assert = std.debug.assert;
 const Ast = @import("ast.zig");
 const Code = @import("code.zig");
 const Parser = @import("parser.zig");
-const IdentifierMap = @import("identifier_map.zig");
+const SymbolTable = @import("symbol_table.zig");
 const ObjectTypes = ObjectPool.ObjectTypes;
 const ObjectIndex = ObjectPool.ObjectIndex;
 const ByteCode = @import("byte_code.zig");

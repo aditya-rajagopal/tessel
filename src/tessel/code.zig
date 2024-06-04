@@ -35,6 +35,9 @@ pub fn make(
             2 => {
                 instructions.appendSliceAssumeCapacity(std.mem.asBytes(&@as(u16, @intCast(operands[i]))));
             },
+            4 => {
+                instructions.appendSliceAssumeCapacity(std.mem.asBytes(&operands[i]));
+            },
             else => unreachable,
         }
     }
@@ -49,6 +52,10 @@ pub fn read_operands(allocator: Allocator, definition: []const u8, ins: Instruct
         switch (d) {
             2 => {
                 const value = @as(u32, @intCast(std.mem.bytesToValue(u16, ins[offset..])));
+                try operands.append(allocator, value);
+            },
+            4 => {
+                const value = std.mem.bytesToValue(u32, ins[offset..]);
                 try operands.append(allocator, value);
             },
             0 => {
@@ -123,6 +130,9 @@ pub const Opcode = enum(u8) {
     neq,
     ltrue,
     lfalse,
+    jmp,
+    jn,
+    lnull,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
@@ -140,6 +150,9 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .neq = &[_]u8{0},
     .lfalse = &[_]u8{0},
     .ltrue = &[_]u8{0},
+    .jmp = &[_]u8{4},
+    .jn = &[_]u8{4},
+    .lnull = &[_]u8{0},
 });
 
 test "test_definitions" {
@@ -163,6 +176,11 @@ test "make code" {
             .op = .add,
             .operands = &[_]u32{},
             .expected = &[_]u8{@as(u8, @intCast(@intFromEnum(Opcode.add)))},
+        },
+        .{
+            .op = .jmp,
+            .operands = &[_]u32{4294901244},
+            .expected = &[_]u8{ @as(u8, @intCast(@intFromEnum(Opcode.jmp))), 252, 253, 254, 255 },
         },
     };
 
@@ -193,6 +211,9 @@ test "make instructions string" {
     try make(&insts, .ltrue, &[_]u32{});
     try make(&insts, .lfalse, &[_]u32{});
     try make(&insts, .neq, &[_]u32{});
+    try make(&insts, .jmp, &[_]u32{9});
+    try make(&insts, .jn, &[_]u32{6});
+    try make(&insts, .lnull, &[_]u32{});
 
     const expected_str =
         \\0000 load_const 1
@@ -210,6 +231,9 @@ test "make instructions string" {
         \\0018 ltrue
         \\0019 lfalse
         \\0020 neq
+        \\0021 jmp 9
+        \\0026 jn 6
+        \\0031 lnull
         \\
     ;
 
@@ -238,6 +262,11 @@ test "code_read_ops" {
             .op = .neg,
             .operands = &[_]u32{},
             .bytes_to_read = 0,
+        },
+        .{
+            .op = .jmp,
+            .operands = &[_]u32{50},
+            .bytes_to_read = 4,
         },
     };
 

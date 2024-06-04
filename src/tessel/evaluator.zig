@@ -8,7 +8,7 @@ environment_pool: EnvironmentPool,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *IdentifierMap) !Evaluator {
+pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *SymbolTable) !Evaluator {
     var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
         .environment_pool = try EnvironmentPool.init(allocator),
@@ -17,7 +17,7 @@ pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *IdentifierMap) !E
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
         const hash = try map.create(allocator, f.name);
-        try eval.environment_pool.create_variable(env, allocator, hash, position, .constant);
+        try eval.environment_pool.create_variable(env, allocator, hash.index, position, .constant);
     }
     return eval;
 }
@@ -1633,8 +1633,8 @@ test "evaluate_hash_map" {
 
 test "evaluate_while_loops" {
     const tests = [_]test_struct{
-        // .{ .source = "while (false) { 10; }", .output = "null" },
-        // .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .output = "10" },
+        .{ .source = "while (false) { 10; }", .output = "null" },
+        .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .output = "10" },
         .{
             .source =
             \\  const fn_call = fn(x) {
@@ -1761,7 +1761,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         if (enable_debug_print) {
             std.debug.print("Testing: Source: {s}\n", .{t.source});
         }
-        var identifier_map = IdentifierMap.init();
+        var identifier_map = SymbolTable.init();
         defer identifier_map.deinit(testing.allocator);
         // var env = try Environment.Create(testing.allocator);
         var eval = try Evaluator.init(testing.allocator, global_env, &identifier_map);
@@ -1813,7 +1813,7 @@ const true_object = ObjectPool.true_object;
 const false_object = ObjectPool.false_object;
 const break_object = ObjectPool.break_object;
 const continue_object = ObjectPool.continue_object;
-const IdentifierMap = @import("identifier_map.zig");
+const SymbolTable = @import("symbol_table.zig");
 const Builtins = @import("builtins.zig");
 const EnvironmentPool = @import("environment_pool.zig");
 const EnvironmentIndex = EnvironmentPool.EnvironmentIndex;

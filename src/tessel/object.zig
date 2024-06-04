@@ -4,6 +4,7 @@ pub const ObjectPool = @This();
 
 object_pool: std.MultiArrayList(InternalObject),
 free_list: std.ArrayListUnmanaged(ObjectIndex),
+reserved: ObjectIndex,
 
 pub const ObjectIndex = u32;
 
@@ -24,6 +25,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
     var pool = ObjectPool{
         .object_pool = .{},
         .free_list = .{},
+        .reserved = reserved_objects,
     };
     try pool.object_pool.ensureUnusedCapacity(allocator, internal_capacity);
     try pool.free_list.ensureUnusedCapacity(allocator, internal_capacity);
@@ -79,6 +81,7 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
                 .refs = 0,
             },
         );
+        self.reserved += 1;
         return @as(u32, @intCast(self.object_pool.len - 1));
     }
 

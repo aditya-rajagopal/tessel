@@ -128,7 +128,7 @@ pub fn free_env(self: *EnvironmentPool, allocator: Allocator, env_loc: Environme
     self.free_list.appendAssumeCapacity(env_loc);
 }
 
-pub fn get_object(self: *EnvironmentPool, env_loc: EnvironmentIndex, hash: IdentifierIndex) EnvPoolError!ObjectIndex {
+pub fn get_object(self: *EnvironmentPool, env_loc: EnvironmentIndex, hash: SymbolIndex) EnvPoolError!ObjectIndex {
     std.debug.assert(env_loc < self.environment_pool.len);
     const env_tag = self.environment_pool.items(.tag)[env_loc];
     if (env_tag == .free) {
@@ -142,7 +142,7 @@ pub fn create_variable(
     self: *EnvironmentPool,
     env_loc: EnvironmentIndex,
     allocator: Allocator,
-    key: IdentifierIndex,
+    key: SymbolIndex,
     value: ObjectIndex,
     tag: Environment.StorageType.Tag,
 ) Error!void {
@@ -158,7 +158,7 @@ pub fn create_variable(
 pub fn update_variable(
     self: *EnvironmentPool,
     env_loc: EnvironmentIndex,
-    key: IdentifierIndex,
+    key: SymbolIndex,
     value: ObjectIndex,
 ) Error!ObjectIndex {
     std.debug.assert(env_loc < self.environment_pool.len);
@@ -212,4 +212,4 @@ const ObjectIndex = @import("object.zig").ObjectIndex;
 const ObjectPool = @import("object.zig");
 const Environment = @import("environment.zig");
 const null_object = @import("object.zig").null_object;
-const IdentifierIndex = @import("identifier_map.zig").IdentifierIndex;
+const SymbolIndex = @import("symbol_table.zig").SymbolIndex;

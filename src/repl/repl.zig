@@ -74,6 +74,7 @@ pub fn start(use_vm: bool) !void {
                 const out = try Code.code_to_str(allocator, byte_code.instructions);
                 defer allocator.free(out);
                 try stdout.print("{s}", .{out});
+                try bw.flush();
                 try vm.run();
 
                 const sptr = vm.stack_top() orelse {

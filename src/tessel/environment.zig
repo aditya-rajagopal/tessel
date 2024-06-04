@@ -2,7 +2,7 @@ pub const Environment = @This();
 
 // TODO: Create an environment pool
 
-memory: std.AutoHashMapUnmanaged(IdentifierIndex, StorageType),
+memory: std.AutoHashMapUnmanaged(SymbolIndex, StorageType),
 parent_env: ?*Environment,
 child_envs: std.ArrayListUnmanaged(*Environment),
 depth: u32 = 0,
@@ -56,7 +56,7 @@ pub fn deinit(self: *Environment, allocator: Allocator, object_pool: *ObjectPool
     allocator.destroy(self);
 }
 
-pub fn get_object(self: *const Environment, key: IdentifierIndex) ObjectIndex {
+pub fn get_object(self: *const Environment, key: SymbolIndex) ObjectIndex {
     const output = self.memory.get(key);
     if (output) |o| {
         return o.value;
@@ -66,7 +66,7 @@ pub fn get_object(self: *const Environment, key: IdentifierIndex) ObjectIndex {
     }
 }
 
-pub fn get_object_ptr(self: *const Environment, key: IdentifierIndex) Error!*StorageType {
+pub fn get_object_ptr(self: *const Environment, key: SymbolIndex) Error!*StorageType {
     const output = self.memory.getPtr(key);
     if (output) |o| {
         return o;
@@ -79,7 +79,7 @@ pub fn get_object_ptr(self: *const Environment, key: IdentifierIndex) Error!*Sto
 pub fn create_variable(
     self: *Environment,
     allocator: Allocator,
-    key: IdentifierIndex,
+    key: SymbolIndex,
     value: ObjectIndex,
     tag: StorageType.Tag,
 ) Error!void {
@@ -91,7 +91,7 @@ pub fn create_variable(
     try self.memory.put(allocator, key, storage);
 }
 
-pub fn update_variable(self: *Environment, key: IdentifierIndex, value: ObjectIndex) Error!ObjectIndex {
+pub fn update_variable(self: *Environment, key: SymbolIndex, value: ObjectIndex) Error!ObjectIndex {
     var value_ptr = try self.get_object_ptr(key);
     if (value_ptr.tag == .constant) {
         return Error.ConstVariableModification;
@@ -159,4 +159,4 @@ const testing = std.testing;
 const ObjectIndex = @import("object.zig").ObjectIndex;
 const ObjectPool = @import("object.zig");
 const null_object = @import("object.zig").null_object;
-const IdentifierIndex = @import("identifier_map.zig").IdentifierIndex;
+const SymbolIndex = @import("symbol_table.zig").SymbolIndex;
