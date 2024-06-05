@@ -133,6 +133,8 @@ pub const Opcode = enum(u8) {
     jmp,
     jn,
     lnull,
+    set_global,
+    get_global,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
@@ -153,6 +155,8 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .jmp = &[_]u8{4},
     .jn = &[_]u8{4},
     .lnull = &[_]u8{0},
+    .set_global = &[_]u8{2},
+    .get_global = &[_]u8{2},
 });
 
 test "test_definitions" {

@@ -32,6 +32,11 @@ pub fn deinit(self: *Ast, allocator: Allocator) void {
     allocator.free(self.integer_literals);
 }
 
+pub fn get_token_literal(ast: *const Ast, tok_loc: Ast.TokenArrayIndex) []const u8 {
+    const tok = ast.tokens.get(tok_loc);
+    return ast.source_buffer[tok.start..tok.end];
+}
+
 pub const Node = struct {
     /// The tag representing the type of node the instance will be
     tag: Tag,
@@ -210,6 +215,9 @@ pub const Error = struct {
         expected_closing_rparen,
         expected_prefix_expression,
         expected_parens_around_if_condition,
+        variable_redecleration,
+        unkown_variable,
+        reassigning_const,
     };
 };
 

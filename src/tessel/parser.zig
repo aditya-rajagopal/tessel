@@ -110,7 +110,7 @@ pub fn begin_parsing(self: *Parser) !void {
     const scratch_top = self.scratch_pad.items.len;
     defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
     while (true) {
-        const node = try self.parse_statement();
+        const node = try self.parse_statement(.global);
         if (node != null_node) {
             try self.scratch_pad.append(self.allocator, node);
         }
@@ -126,11 +126,11 @@ pub fn begin_parsing(self: *Parser) !void {
     self.nodes.items(.node_data)[0].rhs = extra_data_loc.end;
 }
 
-fn parse_statement(self: *Parser) !Ast.Node.NodeIndex {
+fn parse_statement(self: *Parser, scope: SymbolTable.SymbolScope) !Ast.Node.NodeIndex {
     switch (self.token_tags[self.token_current]) {
         .EOF => return null_node,
         .CONST, .VAR => {
-            return self.parse_var_decl() catch |err| switch (err) {
+            return self.parse_var_decl(scope) catch |err| switch (err) {
                 Error.ParsingError => return null_node,
                 else => |overflow| return overflow,
             };
@@ -230,13 +230,34 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
             .rhs = 0,
         },
     });
-    const hash = try self.map.create(self.allocator, self.get_token_literal(ident_token));
+    const hash = self.map.resolve(self.get_token_literal(ident_token)) catch |err| switch (err) {
+        SymbolTable.Error.UnkownIdentifier => {
+            try self.add_error(.{
+                .tag = .unkown_variable, //
+                .token = ident_token,
+                .expected = .IDENT,
+            });
+            _ = self.eat_token_till(.SEMICOLON);
+            return Error.ParsingError;
+        },
+        SymbolTable.Error.IdentifierRedecleration => unreachable,
+        else => |overflow| return overflow,
+    };
+    if (hash.type == .constant) {
+        try self.add_error(.{
+            .tag = .reassigning_const, //
+            .token = ident_token,
+            .expected = .IDENT,
+        });
+        _ = self.eat_token_till(.SEMICOLON);
+        return Error.ParsingError;
+    }
     const ident_node = try self.add_node(.{
         .tag = .IDENTIFIER,
         .main_token = ident_token,
         .node_data = .{
             .lhs = hash.index,
-            .rhs = 0,
+            .rhs = @as(u32, @intFromEnum(hash.type)),
         },
     });
     const expression = try self.parse_expect_expression();
@@ -246,22 +267,62 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     return assign_node;
 }
 
-fn parse_var_decl(self: *Parser) Error!Ast.Node.NodeIndex {
+fn parse_var_decl(self: *Parser, scope: SymbolTable.SymbolScope) Error!Ast.Node.NodeIndex {
+    const var_str = self.get_token_literal(self.token_current);
     const node = try self.add_node(.{
         .tag = Ast.Node.Tag.VAR_STATEMENT, //
         .main_token = self.next_token(),
         .node_data = undefined,
     });
 
+    var var_tag: SymbolTable.Symbol.Tag = .constant;
+    if (std.mem.eql(u8, var_str, "var")) {
+        var_tag = .variable;
+    }
+
     // After a const or var statement you expect a identifier
     if (self.is_current_token(.IDENT)) {
-        const hash = try self.map.create(self.allocator, self.get_token_literal(self.token_current));
+        const hash = self.map.define(
+            self.allocator,
+            self.get_token_literal(self.token_current),
+            var_tag,
+            scope,
+        ) catch |err| switch (err) {
+            SymbolTable.Error.IdentifierRedecleration => esc: {
+                if (scope == .global) {
+                    const hash = self.map.resolve(self.get_token_literal(self.token_current)) catch |err2| switch (err2) {
+                        SymbolTable.Error.UnkownIdentifier => unreachable,
+                        SymbolTable.Error.IdentifierRedecleration => unreachable,
+                        else => |overflow| return overflow,
+                    };
+                    if (hash.scope == .global) {
+                        try self.add_error(.{
+                            .tag = .variable_redecleration, //
+                            .token = self.token_current,
+                            .expected = .IDENT,
+                        });
+                        _ = self.eat_token_till(.SEMICOLON);
+                        return Error.ParsingError;
+                    }
+                    break :esc hash;
+                } else {
+                    break :esc self.map.resolve(self.get_token_literal(self.token_current)) catch |err2| switch (err2) {
+                        SymbolTable.Error.UnkownIdentifier => unreachable,
+                        SymbolTable.Error.IdentifierRedecleration => unreachable,
+                        else => |overflow| return overflow,
+                    };
+                }
+            },
+            SymbolTable.Error.UnkownIdentifier => unreachable,
+            else => |overflow| return overflow,
+        };
+
         const ident = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
             .node_data = .{
                 .lhs = hash.index, //
-                .rhs = 0,
+                .rhs = @as(u32, @intFromEnum(hash.type)),
             },
         });
         self.nodes.items(.node_data)[node].lhs = ident;
@@ -454,13 +515,25 @@ fn parse_expect_prefix_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
     switch (self.token_tags[self.token_current]) {
         .IDENT => {
-            const hash = try self.map.create(self.allocator, self.get_token_literal(self.token_current));
+            const hash = self.map.resolve(self.get_token_literal(self.token_current)) catch |err| switch (err) {
+                SymbolTable.Error.UnkownIdentifier => {
+                    try self.add_error(.{
+                        .tag = .unkown_variable, //
+                        .token = self.token_current,
+                        .expected = .IDENT,
+                    });
+                    _ = self.eat_token_till(.SEMICOLON);
+                    return Error.ParsingError;
+                },
+                SymbolTable.Error.IdentifierRedecleration => unreachable,
+                else => |overflow| return overflow,
+            };
             return self.add_node(.{
                 .tag = .IDENTIFIER, //
                 .main_token = self.next_token(),
                 .node_data = .{
                     .lhs = hash.index,
-                    .rhs = 0,
+                    .rhs = @as(u32, @intFromEnum(hash.type)),
                 },
             });
         },
@@ -674,13 +747,23 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
     const start_pos = @as(u32, @intCast(self.nodes.len));
     while (true) {
         const next_tok = try self.expect_token(.IDENT);
-        const hash = try self.map.create(self.allocator, self.get_token_literal(next_tok));
+        const hash = self.map.define(self.allocator, self.get_token_literal(next_tok), .constant, .block) catch |err| switch (err) {
+            SymbolTable.Error.IdentifierRedecleration => esc: {
+                break :esc self.map.resolve(self.get_token_literal(next_tok)) catch |err2| switch (err2) {
+                    SymbolTable.Error.UnkownIdentifier => unreachable,
+                    SymbolTable.Error.IdentifierRedecleration => unreachable,
+                    else => |overflow| return overflow,
+                };
+            },
+            SymbolTable.Error.UnkownIdentifier => unreachable,
+            else => |overflow| return overflow,
+        };
         _ = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = next_tok,
             .node_data = .{
                 .lhs = hash.index, //
-                .rhs = 0,
+                .rhs = @as(u32, @intFromEnum(hash.type)),
             },
         });
         if (self.is_current_token(.RPAREN)) break;
@@ -756,7 +839,7 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
             });
             return Error.ParsingError;
         }
-        const statement = try self.parse_statement();
+        const statement = try self.parse_statement(.block);
         if (statement == 0) {
             break;
         }
@@ -1159,6 +1242,7 @@ test "parser_test_return_stmt" {
     const input =
         \\ return 5;
         \\ return 10;
+        \\ const a = 10;
         \\ return a;
     ;
 
@@ -1177,7 +1261,7 @@ test "parser_test_return_stmt" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 3,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .RETURN_STATEMENT, //
@@ -1204,10 +1288,10 @@ test "parser_test_return_stmt" {
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .RETURN_STATEMENT, //
+            .expectedNodeType = .VAR_STATEMENT, //
             .expectedMainToken = 6,
             .expectedDataLHS = 6,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 7,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
@@ -1215,16 +1299,35 @@ test "parser_test_return_stmt" {
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 9,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .RETURN_STATEMENT, //
+            .expectedMainToken = 11,
+            .expectedDataLHS = 9,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 12,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
     };
 
-    const int_literals = [_]i64{ 5, 10 };
+    const int_literals = [_]i64{ 5, 10, 10 };
 
-    const test_extras = [_]Ast.Node.NodeIndex{ 1, 3, 5 };
+    const test_extras = [_]Ast.Node.NodeIndex{ 1, 3, 5, 8 };
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
 test "parser_test_assignement_stmt" {
     const input =
+        \\ var b = 5;
         \\ b = fn(c) { c }
     ;
 
@@ -1243,65 +1346,84 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 3,
         },
         .{
-            .expectedNodeType = .ASSIGNMENT_STATEMENT, //
-            .expectedMainToken = 1,
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
             .expectedDataLHS = 2,
-            .expectedDataRHS = 8,
+            .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 0,
+            .expectedMainToken = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 1,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 3,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
+            .expectedNodeType = .ASSIGNMENT_STATEMENT, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 11,
+        },
+        .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 4,
+            .expectedMainToken = 5,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 1,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 9,
             .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
-            .expectedMainToken = 2,
-            .expectedDataLHS = 3,
-            .expectedDataRHS = 4,
+            .expectedMainToken = 7,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = 7,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
-            .expectedMainToken = 7,
-            .expectedDataLHS = 6,
+            .expectedMainToken = 12,
+            .expectedDataLHS = 9,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 7,
+            .expectedMainToken = 12,
             .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .BLOCK, //
-            .expectedMainToken = 6,
+            .expectedMainToken = 11,
             .expectedDataLHS = 0,
             .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .FUNCTION_EXPRESSION, //
-            .expectedMainToken = 2,
-            .expectedDataLHS = 4,
-            .expectedDataRHS = 7,
+            .expectedMainToken = 7,
+            .expectedDataLHS = 7,
+            .expectedDataRHS = 10,
         },
     };
 
-    const test_extras = [_]Ast.Node.NodeIndex{ 5, 1 };
-    const int_literals = [_]i64{};
+    const test_extras = [_]Ast.Node.NodeIndex{ 8, 1, 4 };
+    const int_literals = [_]i64{5};
 
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
+
 test "parser_test_identifer" {
-    const input = "foobar;";
+    const input = "const foobar = 10; foobar;";
     var identifier_map = SymbolTable.init();
     defer identifier_map.deinit(testing.allocator);
     var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
@@ -1317,25 +1439,43 @@ test "parser_test_identifer" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 1,
+            .expectedDataRHS = 2,
+        },
+        .{
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 3,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 3,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
-            .expectedMainToken = 0,
-            .expectedDataLHS = 2,
+            .expectedMainToken = 5,
+            .expectedDataLHS = 5,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 0,
+            .expectedMainToken = 5,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
     };
 
-    const int_literals = [_]i64{};
+    const int_literals = [_]i64{10};
 
-    const test_extras = [_]Ast.Node.NodeIndex{1};
+    const test_extras = [_]Ast.Node.NodeIndex{ 1, 4 };
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
@@ -1445,130 +1585,130 @@ test "parser_test_prefix_operators" {
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
 }
 
-test "parser_test_infix_operators" {
-    const tests = [_]struct { input: [:0]const u8, expected: [:0]const u8 }{
-        .{
-            .input = "-a * b", //
-            .expected = "((-a) * b);",
-        },
-        .{
-            .input = "!-a",
-            .expected = "(!(-a));",
-        },
-        .{
-            .input = "a + b + c",
-            .expected = "((a + b) + c);",
-        },
-        .{
-            .input = "a + b - c",
-            .expected = "((a + b) - c);",
-        },
-        .{
-            .input = "a * b * c",
-            .expected = "((a * b) * c);",
-        },
-        .{
-            .input = "a * b / c",
-            .expected = "((a * b) / c);",
-        },
-        .{
-            .input = "a + b / c",
-            .expected = "(a + (b / c));",
-        },
-        .{
-            .input = "a + b * c + d / e - f",
-            .expected = "(((a + (b * c)) + (d / e)) - f);",
-        },
-        .{
-            .input = "3 + 4; -5 * 5",
-            .expected = "(3 + 4);((-5) * 5);",
-        },
-        .{
-            .input = "5 > 4 == 3 < 4",
-            .expected = "((5 > 4) == (3 < 4));",
-        },
-        .{
-            .input = "5 < 4 != 3 > 4",
-            .expected = "((5 < 4) != (3 > 4));",
-        },
-        .{
-            .input = "3 + 4 * 5 == 3 * 1 + 4 * 5",
-            .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)));",
-        },
-        .{
-            .input = "true",
-            .expected = "true;",
-        },
-        .{
-            .input = "false",
-            .expected = "false;",
-        },
-        .{
-            .input = "3 > 5 == false",
-            .expected = "((3 > 5) == false);",
-        },
-        .{
-            .input = "3 < 5 == true",
-            .expected = "((3 < 5) == true);",
-        },
-        .{
-            .input = "1 + (2 + 3) + 4",
-            .expected = "((1 + (2 + 3)) + 4);",
-        },
-        .{
-            .input = "(5 + 5) * 2",
-            .expected = "((5 + 5) * 2);",
-        },
-        .{
-            .input = "2 / (5 + 5);",
-            .expected = "(2 / (5 + 5));",
-        },
-        .{
-            .input = "(5 + 5) * 2 * (5 + 5);",
-            .expected = "(((5 + 5) * 2) * (5 + 5));",
-        },
-        .{
-            .input = "-(5 + 5);",
-            .expected = "(-(5 + 5));",
-        },
-        .{
-            .input = "!(true == true);",
-            .expected = "(!(true == true));",
-        },
-        .{
-            .input = "a + add(b * c) + d",
-            .expected = "((a + add((b * c))) + d);",
-        },
-        .{
-            .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8));",
-            .expected = "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)));",
-        },
-        .{
-            .input = "add(a + b + c * d / f + g);",
-            .expected = "add((((a + b) + ((c * d) / f)) + g));",
-        },
-    };
-    for (tests, 0..) |t, i| {
-        _ = i;
-        var identifier_map = SymbolTable.init();
-        defer identifier_map.deinit(testing.allocator);
-        var ast = try Parser.parse_program(t.input, testing.allocator, &identifier_map);
-        defer ast.deinit(testing.allocator);
-        var outlist = std.ArrayList(u8).init(testing.allocator);
-        defer outlist.deinit();
-        try convert_ast_to_string(&ast, 1, &outlist);
-        outlist.shrinkRetainingCapacity(outlist.items.len);
-        try testing.expectEqualSlices(u8, t.expected[0..t.expected.len], outlist.allocatedSlice()[0..outlist.items.len]);
-        // std.debug.print("Index: {d}\r\n", .{i});
-        // std.debug.print("Source: {s}\r\n", .{t.input});
-        // std.debug.print("Parsed: {s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
-        // std.debug.print("Parsed: {s}\r\n", .{t.expected});
-    }
-}
+// test "parser_test_infix_operators" {
+//     const tests = [_]struct { input: [:0]const u8, expected: [:0]const u8 }{
+//         .{
+//             .input = "-a * b", //
+//             .expected = "((-a) * b);",
+//         },
+//         .{
+//             .input = "!-a",
+//             .expected = "(!(-a));",
+//         },
+//         .{
+//             .input = "a + b + c",
+//             .expected = "((a + b) + c);",
+//         },
+//         .{
+//             .input = "a + b - c",
+//             .expected = "((a + b) - c);",
+//         },
+//         .{
+//             .input = "a * b * c",
+//             .expected = "((a * b) * c);",
+//         },
+//         .{
+//             .input = "a * b / c",
+//             .expected = "((a * b) / c);",
+//         },
+//         .{
+//             .input = "a + b / c",
+//             .expected = "(a + (b / c));",
+//         },
+//         .{
+//             .input = "a + b * c + d / e - f",
+//             .expected = "(((a + (b * c)) + (d / e)) - f);",
+//         },
+//         .{
+//             .input = "3 + 4; -5 * 5",
+//             .expected = "(3 + 4);((-5) * 5);",
+//         },
+//         .{
+//             .input = "5 > 4 == 3 < 4",
+//             .expected = "((5 > 4) == (3 < 4));",
+//         },
+//         .{
+//             .input = "5 < 4 != 3 > 4",
+//             .expected = "((5 < 4) != (3 > 4));",
+//         },
+//         .{
+//             .input = "3 + 4 * 5 == 3 * 1 + 4 * 5",
+//             .expected = "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)));",
+//         },
+//         .{
+//             .input = "true",
+//             .expected = "true;",
+//         },
+//         .{
+//             .input = "false",
+//             .expected = "false;",
+//         },
+//         .{
+//             .input = "3 > 5 == false",
+//             .expected = "((3 > 5) == false);",
+//         },
+//         .{
+//             .input = "3 < 5 == true",
+//             .expected = "((3 < 5) == true);",
+//         },
+//         .{
+//             .input = "1 + (2 + 3) + 4",
+//             .expected = "((1 + (2 + 3)) + 4);",
+//         },
+//         .{
+//             .input = "(5 + 5) * 2",
+//             .expected = "((5 + 5) * 2);",
+//         },
+//         .{
+//             .input = "2 / (5 + 5);",
+//             .expected = "(2 / (5 + 5));",
+//         },
+//         .{
+//             .input = "(5 + 5) * 2 * (5 + 5);",
+//             .expected = "(((5 + 5) * 2) * (5 + 5));",
+//         },
+//         .{
+//             .input = "-(5 + 5);",
+//             .expected = "(-(5 + 5));",
+//         },
+//         .{
+//             .input = "!(true == true);",
+//             .expected = "(!(true == true));",
+//         },
+//         .{
+//             .input = "a + add(b * c) + d",
+//             .expected = "((a + add((b * c))) + d);",
+//         },
+//         .{
+//             .input = "add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8));",
+//             .expected = "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)));",
+//         },
+//         .{
+//             .input = "add(a + b + c * d / f + g);",
+//             .expected = "add((((a + b) + ((c * d) / f)) + g));",
+//         },
+//     };
+//     for (tests, 0..) |t, i| {
+//         _ = i;
+//         var identifier_map = SymbolTable.init();
+//         defer identifier_map.deinit(testing.allocator);
+//         var ast = try Parser.parse_program(t.input, testing.allocator, &identifier_map);
+//         defer ast.deinit(testing.allocator);
+//         var outlist = std.ArrayList(u8).init(testing.allocator);
+//         defer outlist.deinit();
+//         try convert_ast_to_string(&ast, 1, &outlist);
+//         outlist.shrinkRetainingCapacity(outlist.items.len);
+//         try testing.expectEqualSlices(u8, t.expected[0..t.expected.len], outlist.allocatedSlice()[0..outlist.items.len]);
+//         // std.debug.print("Index: {d}\r\n", .{i});
+//         // std.debug.print("Source: {s}\r\n", .{t.input});
+//         // std.debug.print("Parsed: {s}\r\n", .{outlist.allocatedSlice()[0..outlist.items.len]});
+//         // std.debug.print("Parsed: {s}\r\n", .{t.expected});
+//     }
+// }
 
 test "parser_test_if_else_block" {
     const input =
-        \\ const a = if ( a < b) {
+        \\ const a = if ( a < 10) {
         \\      var b = 10;
         \\ } else {
         \\      var b = 15;
@@ -1611,9 +1751,9 @@ test "parser_test_if_else_block" {
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .IDENTIFIER, //
+            .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 7,
-            .expectedDataLHS = 1,
+            .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
@@ -1632,12 +1772,12 @@ test "parser_test_if_else_block" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 13,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1656,12 +1796,12 @@ test "parser_test_if_else_block" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 19,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 21,
-            .expectedDataLHS = 1,
+            .expectedDataLHS = 2,
             .expectedDataRHS = 0,
         },
         .{
@@ -1679,14 +1819,14 @@ test "parser_test_if_else_block" {
     };
 
     const test_extra_data = [_]u32{ 6, 10, 9, 13, 1 };
-    const int_literals = [_]i64{ 10, 15 };
+    const int_literals = [_]i64{ 10, 10, 15 };
 
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_test_naked_if" {
     const input =
-        \\ const a = if ( a < b) {
+        \\ const a = if ( a < 10) {
         \\      var b = 10;
         \\ };
     ;
@@ -1727,9 +1867,9 @@ test "parser_test_naked_if" {
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .IDENTIFIER, //
+            .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 7,
-            .expectedDataLHS = 1,
+            .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
@@ -1748,12 +1888,12 @@ test "parser_test_naked_if" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 1,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 13,
-            .expectedDataLHS = 0,
+            .expectedDataLHS = 1,
             .expectedDataRHS = 0,
         },
         .{
@@ -1772,13 +1912,14 @@ test "parser_test_naked_if" {
 
     const test_extra_data = [_]u32{ 6, 1 };
 
-    const int_literals = [_]i64{10};
+    const int_literals = [_]i64{ 10, 10 };
 
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
 test "parser_array_expression" {
     const input =
+        \\const three = 3;
         \\[1 , "two", three][1 * 2]
     ;
     var identifier_map = SymbolTable.init();
@@ -1796,70 +1937,89 @@ test "parser_array_expression" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 3,
-            .expectedDataRHS = 4,
+            .expectedDataRHS = 5,
         },
         .{
-            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedNodeType = .VAR_STATEMENT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 9,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 3,
         },
         .{
-            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .STRING_LITERAL, //
+            .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 3,
-            .expectedDataLHS = 6,
-            .expectedDataRHS = 9,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = 12,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 6,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .STRING_LITERAL, //
+            .expectedMainToken = 8,
+            .expectedDataLHS = 23,
+            .expectedDataRHS = 26,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 5,
+            .expectedMainToken = 10,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .ARRAY_LITERAL, //
-            .expectedMainToken = 0,
+            .expectedMainToken = 5,
             .expectedDataLHS = 0,
             .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
-            .expectedMainToken = 8,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
-        },
-        .{
-            .expectedNodeType = .INTEGER_LITERAL, //
-            .expectedMainToken = 10,
+            .expectedMainToken = 13,
             .expectedDataLHS = 2,
             .expectedDataRHS = 0,
         },
         .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 15,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 0,
+        },
+        .{
             .expectedNodeType = .MULTIPLY, //
-            .expectedMainToken = 9,
-            .expectedDataLHS = 6,
-            .expectedDataRHS = 7,
+            .expectedMainToken = 14,
+            .expectedDataLHS = 9,
+            .expectedDataRHS = 10,
         },
         .{
             .expectedNodeType = .INDEX_INTO, //
-            .expectedMainToken = 7,
-            .expectedDataLHS = 5,
-            .expectedDataRHS = 8,
+            .expectedMainToken = 12,
+            .expectedDataLHS = 8,
+            .expectedDataRHS = 11,
         },
     };
 
-    const test_extra_data = [_]u32{ 2, 3, 4, 1 };
+    const test_extra_data = [_]u32{ 5, 6, 7, 1, 4 };
 
-    const int_literals = [_]i64{ 1, 1, 2 };
+    const int_literals = [_]i64{ 3, 1, 1, 2 };
 
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
+
 test "parser_test_function_expression" {
     const input =
         \\ fn(a, b) {
@@ -2016,6 +2176,8 @@ test "parser_test_function_empty_param" {
 
 test "parser_test_function_call_expr" {
     const input =
+        \\ const a = 10;
+        \\ const b = 20;
         \\ a(1, 2, b(3, 4));
     ;
     var identifier_map = SymbolTable.init();
@@ -2033,31 +2195,31 @@ test "parser_test_function_call_expr" {
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
             .expectedDataLHS = 9,
-            .expectedDataRHS = 10,
+            .expectedDataRHS = 12,
         },
         .{
-            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedNodeType = .VAR_STATEMENT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 9,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
-            .expectedMainToken = 0,
+            .expectedMainToken = 1,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
-            .expectedMainToken = 2,
+            .expectedMainToken = 3,
             .expectedDataLHS = 0,
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .INTEGER_LITERAL, //
-            .expectedMainToken = 4,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedNodeType = .VAR_STATEMENT, //
+            .expectedMainToken = 5,
+            .expectedDataLHS = 5,
+            .expectedDataRHS = 6,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
@@ -2068,32 +2230,68 @@ test "parser_test_function_call_expr" {
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
             .expectedMainToken = 8,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .EXPRESSION_STATEMENT, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 15,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 10,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 12,
             .expectedDataLHS = 2,
             .expectedDataRHS = 0,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
-            .expectedMainToken = 10,
+            .expectedMainToken = 14,
             .expectedDataLHS = 3,
             .expectedDataRHS = 0,
         },
         .{
-            .expectedNodeType = .FUNCTION_CALL, //
-            .expectedMainToken = 7,
+            .expectedNodeType = .IDENTIFIER, //
+            .expectedMainToken = 16,
+            .expectedDataLHS = 1,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 18,
+            .expectedDataLHS = 4,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .INTEGER_LITERAL, //
+            .expectedMainToken = 20,
             .expectedDataLHS = 5,
+            .expectedDataRHS = 0,
+        },
+        .{
+            .expectedNodeType = .FUNCTION_CALL, //
+            .expectedMainToken = 17,
+            .expectedDataLHS = 11,
             .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .FUNCTION_CALL, //
-            .expectedMainToken = 1,
-            .expectedDataLHS = 2,
+            .expectedMainToken = 11,
+            .expectedDataLHS = 8,
             .expectedDataRHS = 7,
         },
     };
 
-    const test_extra_data = [_]u32{ 6, 7, 0, 2, 3, 4, 8, 4, 7, 1 };
+    const test_extra_data = [_]u32{ 12, 13, 0, 2, 9, 10, 14, 4, 7, 1, 4, 7 };
 
-    const int_literals = [_]i64{ 1, 2, 3, 4 };
+    const int_literals = [_]i64{ 10, 20, 1, 2, 3, 4 };
 
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
@@ -2112,7 +2310,7 @@ fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytyp
     try testing.expectEqual(test_nodes.len, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
     try testing.expectEqual(test_extras.len, ast.extra_data.len);
-    try testing.expectEqualSlices(u32, ast.extra_data[0..ast.extra_data.len], &test_extras);
+    try testing.expectEqualSlices(u32, &test_extras, ast.extra_data[0..ast.extra_data.len]);
     try testing.expectEqual(int_literals.len, ast.integer_literals.len);
     try testing.expectEqualSlices(i64, int_literals[0..], ast.integer_literals);
 

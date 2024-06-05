@@ -4,6 +4,8 @@ instructions: std.ArrayList(u8),
 constants: ObjectPool,
 gpa: Allocator,
 symbol_table: *SymbolTable,
+allocator: Allocator,
+// temp_constants: []ObjectPool.InternalObject,
 
 pub const CompilerErrors = error{ IllegalAstNodeReference, ReferencingRootNode };
 const Error = CompilerErrors || Allocator.Error;
@@ -14,10 +16,13 @@ pub fn init(allocator: Allocator, map: *SymbolTable) !Compiler {
         .constants = try ObjectPool.init(allocator),
         .gpa = allocator,
         .symbol_table = map,
+        .allocator = allocator,
+        // .temp_constants = try allocator.alloc(ObjectPool.InternalObject, map.current_index),
     };
+
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try comp.constants.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
-        const hash = try map.create(allocator, f.name);
+        const hash = try map.define(allocator, f.name, .constant, .global);
         _ = position;
         _ = hash;
         // try eval.environment_pool.create_variable(env, allocator, hash, position, .constant);
@@ -25,9 +30,17 @@ pub fn init(allocator: Allocator, map: *SymbolTable) !Compiler {
     return comp;
 }
 
-pub fn deinit(self: *Compiler, allocator: Allocator) void {
-    self.constants.deinit(allocator);
+pub fn deinit(self: *Compiler) void {
+    self.constants.deinit(self.allocator);
     self.instructions.deinit();
+    // allocator.free(self.temp_constants);
+}
+
+pub fn get_byte_code(self: *Compiler) !ByteCode {
+    return ByteCode{
+        .instructions = self.instructions.items,
+        .constants = self.constants.object_pool.slice(),
+    };
 }
 
 pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
@@ -67,6 +80,11 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
                 return;
             }
         },
+        .VAR_STATEMENT => {
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            const ident = ast.nodes.get(ast_node.node_data.lhs);
+            try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
+        },
         else => unreachable,
     }
 }
@@ -89,6 +107,9 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
                 @ptrCast(&ast.integer_literals[ast_node.node_data.lhs]),
             );
             try self.emit(.load_const, &[_]u32{obj});
+        },
+        .IDENTIFIER => {
+            try self.emit(.get_global, &[_]u32{ast_node.node_data.lhs});
         },
         .BOOLEAN_LITERAL => {
             if (ast_node.node_data.lhs == 1) {
@@ -225,13 +246,6 @@ fn emit(self: *Compiler, op: Code.Opcode, operands: []const ObjectIndex) !void {
     try Code.make(&self.instructions, op, operands);
 }
 
-pub fn get_byte_code(self: *Compiler) !ByteCode {
-    return .{
-        .instructions = try self.instructions.toOwnedSlice(),
-        .constants = self.constants.object_pool.toOwnedSlice(),
-    };
-}
-
 const CompilerTest = struct {
     source: [:0]const u8,
     expected_instructions: []const u8,
@@ -354,7 +368,7 @@ fn test_compiler(tests: []const CompilerTest) !void {
         var symbol_table = SymbolTable.init();
         defer symbol_table.deinit(testing.allocator);
         var compiler = try Compiler.init(testing.allocator, &symbol_table);
-        defer compiler.deinit(testing.allocator);
+        defer compiler.deinit();
         var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
         try compiler.compile(&ast, 0);
@@ -381,8 +395,6 @@ fn test_compiler(tests: []const CompilerTest) !void {
                 else => unreachable,
             }
         }
-        testing.allocator.free(byte_code.instructions);
-        byte_code.constants.deinit(testing.allocator);
     }
 }
 

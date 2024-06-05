@@ -81,5 +81,5 @@ const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
 const object = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
-const IdentifierMap = @import("tessel/identifier_map.zig");
+const IdentifierMap = @import("tessel/symbol_table.zig");
 const global_env = @import("tessel/environment_pool.zig").global_env;

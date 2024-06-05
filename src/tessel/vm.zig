@@ -1,54 +1,58 @@
 pub const VM = @This();
 
-instructions: []const u8,
-constants: std.MultiArrayList(ObjectPool.InternalObject).Slice,
+// instructions: []const u8,
+// constants: std.MultiArrayList(ObjectPool.InternalObject).Slice,
 allocator: Allocator,
 
 stack: std.MultiArrayList(ObjectPool.InternalObject),
+globals: []ObjectPool.InternalObject,
 stack_ptr: usize = 0,
 
 pub const VMError = error{ StackOverflow, AccessingEmptyStack, InsufficientOperandsOnStack, TypeMismatch };
 pub const Error = VMError || Allocator.Error;
 
 pub const stack_limit = 2048;
+pub const globals_size = 65536;
 
-pub fn init(byte_code: ByteCode, allocator: Allocator) !VM {
+pub fn init(allocator: Allocator) !VM {
     var vm = VM{
-        .instructions = byte_code.instructions,
-        .constants = byte_code.constants,
+        // .instructions = byte_code.instructions,
+        // .constants = byte_code.constants,
         .allocator = allocator,
         .stack = .{},
+        .globals = try allocator.alloc(ObjectPool.InternalObject, globals_size),
     };
     try vm.stack.ensureTotalCapacity(allocator, stack_limit);
     return vm;
 }
 
 pub fn deinit(self: *VM) void {
-    self.allocator.free(self.instructions);
-    self.constants.deinit(self.allocator);
+    // self.allocator.free(self.instructions);
+    // self.constants.deinit(self.allocator);
     self.stack.deinit(self.allocator);
+    self.allocator.free(self.globals);
 }
 
-pub fn run(self: *VM) !void {
-    var index: usize = 0;
-    while (index < self.instructions.len) {
-        const op: Code.Opcode = @enumFromInt(self.instructions[index]);
+pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
+    var index: usize = @intCast(start_index);
+    while (index < byte_code.instructions.len) {
+        const op: Code.Opcode = @enumFromInt(byte_code.instructions[index]);
         // std.debug.print("Index: {d} op:{s}\n", .{ index, @tagName(op) });
 
         switch (op) {
             .load_const => {
-                const obj_index = std.mem.bytesToValue(u16, self.instructions[index + 1 ..]);
+                const obj_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
                 index += 2;
-                try self.stack_push(self.constants.get(obj_index));
+                try self.stack_push(byte_code.constants.get(obj_index));
             },
             .ltrue => {
-                try self.stack_push(self.constants.get(ObjectPool.true_object));
+                try self.stack_push(byte_code.constants.get(ObjectPool.true_object));
             },
             .lfalse => {
-                try self.stack_push(self.constants.get(ObjectPool.false_object));
+                try self.stack_push(byte_code.constants.get(ObjectPool.false_object));
             },
             .lnull => {
-                try self.stack_push(self.constants.get(ObjectPool.null_object));
+                try self.stack_push(byte_code.constants.get(ObjectPool.null_object));
             },
             .add,
             .sub,
@@ -98,7 +102,7 @@ pub fn run(self: *VM) !void {
                 }
             },
             .jmp => {
-                const destination = std.mem.bytesToValue(u16, self.instructions[index + 1 ..]);
+                const destination = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
                 index = destination;
                 continue;
             },
@@ -119,14 +123,28 @@ pub fn run(self: *VM) !void {
                     index += 5;
                     continue;
                 } else {
-                    const destination = std.mem.bytesToValue(u16, self.instructions[index + 1 ..]);
+                    const destination = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
                     index = destination;
                     continue;
                 }
             },
+            .set_global => {
+                const var_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
+                index += 2;
+
+                const expr = self.stack_pop();
+                self.globals[var_index] = expr;
+            },
+            .get_global => {
+                const var_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
+                index += 2;
+
+                try self.stack_push(self.globals[var_index]);
+            },
         }
         index += 1;
     }
+    return index;
 }
 
 fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
@@ -217,7 +235,7 @@ fn eval_eq(self: *VM, op: Code.Opcode) !void {
     }
 }
 
-fn stack_pop(self: *VM) ObjectPool.InternalObject {
+pub fn stack_pop(self: *VM) ObjectPool.InternalObject {
     self.stack_ptr -= 1;
     return self.stack.pop();
 }
@@ -244,14 +262,14 @@ test "vm_init" {
     defer symbol_table.deinit(testing.allocator);
 
     var compiler = try Compiler.init(testing.allocator, &symbol_table);
-    defer compiler.deinit(testing.allocator);
+    defer compiler.deinit();
 
     var ast = try Parser.parse_program(source, testing.allocator, &symbol_table);
     defer ast.deinit(testing.allocator);
 
     try compiler.compile(&ast, 0);
-    const byte_code: ByteCode = try compiler.get_byte_code();
-    var vm = try VM.init(byte_code, testing.allocator);
+    // const byte_code: ByteCode = try compiler.get_byte_code();
+    var vm = try VM.init(testing.allocator);
     vm.deinit();
     // byte_code.deinit(testing.allocator);
 }
@@ -357,14 +375,16 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
         var symbol_table = SymbolTable.init();
         defer symbol_table.deinit(testing.allocator);
         var compiler = try Compiler.init(testing.allocator, &symbol_table);
-        defer compiler.deinit(testing.allocator);
+        defer compiler.deinit();
         var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
         try compiler.compile(&ast, 0);
         const byte_code: ByteCode = try compiler.get_byte_code();
-        var vm = try VM.init(byte_code, testing.allocator);
+        // defer byte_code.deinit(testing.allocator);
+        // var vm = try VM.init(byte_code, testing.allocator);
+        var vm = try VM.init(testing.allocator);
         defer vm.deinit();
-        try vm.run();
+        _ = try vm.run(byte_code, 0);
 
         if (vm.stack_top()) |sptr| {
             const object = vm.stack.get(sptr - 1);

@@ -1,8 +1,5 @@
 pub const Evaluator = @This();
 
-// TODO: REPL needs to be fixed. The Asts of subsequent lines cannot call functions as the blocks reference nodes that
-// do not exist anymore.
-
 object_pool: ObjectPool,
 environment_pool: EnvironmentPool,
 
@@ -16,7 +13,7 @@ pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *SymbolTable) !Eva
 
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
-        const hash = try map.create(allocator, f.name);
+        const hash = try map.define(allocator, f.name, .constant, .global);
         try eval.environment_pool.create_variable(env, allocator, hash.index, position, .constant);
     }
     return eval;
@@ -1680,7 +1677,7 @@ test "evaluate_function_expressions" {
             \\  };
             \\  const a = fn_call(2);
             \\  const b = fn_call(3);
-            \\  b(3);
+            \\  a(3);
             \\  b(7);
             ,
             .output = "10",
@@ -1735,21 +1732,12 @@ test "evaluate_identifiers" {
 test "evaluate_errors" {
     const tests = [_]test_struct{
         .{ .source = "5 + true", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
-        .{ .source = "foobar", .output = "Identifier not found: foobar" },
-        .{ .source = "foobar * 10", .output = "Identifier not found: foobar" },
-        .{ .source = "5; fizzbuzz * 10", .output = "Identifier not found: fizzbuzz" },
-        .{ .source = "if ( 1 + 2 < a ) { return false + 5; }", .output = "Identifier not found: a" },
-        .{ .source = "if ( 1 + 2 < 10 ) { 10; c; return b + 5; }", .output = "Identifier not found: c" },
         .{ .source = "true - true", .output = "Unknown Operation: <BOOLEAN> - <BOOLEAN>" },
         .{ .source = "-true", .output = "Unknown Operation: -<BOOLEAN>" },
         .{ .source = "if ( 1 < 10 ) { return false + 5; }", .output = "Unknown Operation: <BOOLEAN> + <INTEGER>" },
         .{ .source = "if ( 1 + true < 10 ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
         .{ .source = "if ( 10 > 1 + true ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
         .{ .source = "5 + 5; 5 + true; if ( 1 < 10 ) { return false + 5; }", .output = "Unknown Operation: <INTEGER> + <BOOLEAN>" },
-        .{ .source = "const a = 10; a = 11;", .output = "Identifier \"a\" is declared as a constant and cannot be modified" },
-        .{ .source = "const a = 10; b = 11;", .output = "Identifier \"b\" does not exist. Cannot assign anything to it." },
-        .{ .source = "const a = 10; const a = 11;", .output = "Identifier \"a\" has already been initialised" },
-        .{ .source = "const add = fn(x, y) { return x + y}; add(1, b)", .output = "Identifier not found: b" },
     };
 
     try eval_tests(&tests, false);

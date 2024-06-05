@@ -31,10 +31,13 @@ pub fn start() !void {
     defer source_buffer.deinit();
     try source_buffer.append(0);
     var start_statement: u32 = 0;
+
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
-
-    var eval = try Evaluator.init(allocator, global_env, &identifier_map);
+    var compiler = try Compiler.init(allocator, &identifier_map);
+    defer compiler.deinit();
+    var vm = try VM.init(allocator);
+    defer vm.deinit();
 
     while (true) {
         try stdout.print("{s}", .{PROMT});
@@ -52,7 +55,7 @@ pub fn start() !void {
                 try bw.flush();
                 break;
             }
-            _ = source_buffer.pop();
+            _ = source_buffer.popOrNull();
             try source_buffer.appendSlice(m);
             try source_buffer.append('\n');
             try source_buffer.append(0);
@@ -64,19 +67,29 @@ pub fn start() !void {
             defer ast.deinit(allocator);
 
             try Parser.print_parser_errors_to_stdout(&ast, stdout);
-            const output = try eval.evaluate_program(&ast, start_statement, allocator, global_env);
-            const outstr = try eval.object_pool.ToString(&buffer, output);
-            const tag = eval.object_pool.get_tag(output);
-            switch (tag) {
-                .null => {},
-                else => try stdout.print("Output >> {s}\n", .{outstr}),
-            }
-            eval.object_pool.free(allocator, output);
+            try compiler.compile(&ast, 0);
+            const byte_code = try compiler.get_byte_code();
+
+            const out = try Code.code_to_str(allocator, byte_code.instructions);
+            defer allocator.free(out);
+            try stdout.print("{s}\n", .{out});
             try bw.flush();
-            start_statement = ast.nodes.get(0).node_data.rhs - ast.nodes.get(0).node_data.lhs;
+
+            start_statement = @intCast(try vm.run(byte_code, start_statement));
+            source_buffer.shrinkRetainingCapacity(0);
+
+            try stdout.print("{d}\n", .{byte_code.instructions});
+            _ = vm.stack_top() orelse {
+                // try stdout.print("Error running code. Stack empty", .{});
+                try bw.flush();
+                continue;
+            };
+
+            const outstr = try object.ObjectToString(vm.stack_pop(), &buffer);
+            try stdout.print("Output >> {s}\n", .{outstr});
+            try bw.flush();
         }
     }
-    eval.deinit(allocator);
 }
 
 fn print_header(stdout: anytype) !void {
@@ -96,3 +109,6 @@ const object = @import("../tessel/object.zig");
 const Environment = @import("../tessel/environment.zig");
 const IdentifierMap = @import("../tessel/symbol_table.zig");
 const global_env = @import("../tessel/environment_pool.zig").global_env;
+const Compiler = @import("../tessel/compiler.zig");
+const Code = @import("../tessel/code.zig");
+const VM = @import("../tessel/vm.zig");

@@ -9,11 +9,21 @@ pub const Symbol = struct {
     name: []const u8,
     scope: SymbolScope,
     index: SymbolIndex,
+    type: Tag,
+
+    pub const Tag = enum {
+        constant,
+        variable,
+    };
 };
 
 pub const SymbolScope = enum {
     global,
+    block,
 };
+
+pub const SymbolError = error{ IdentifierRedecleration, UnkownIdentifier };
+pub const Error = SymbolError || Allocator.Error;
 
 pub fn init() SymbolTable {
     return SymbolTable{
@@ -30,9 +40,15 @@ pub fn deinit(self: *SymbolTable, allocator: Allocator) void {
     self.map.deinit(allocator);
 }
 
-pub fn create(self: *SymbolTable, allocator: Allocator, key: []const u8) !Symbol {
+pub fn define(
+    self: *SymbolTable,
+    allocator: Allocator,
+    key: []const u8,
+    tag: Symbol.Tag,
+    scope: SymbolScope,
+) !Symbol {
     if (self.map.contains(key)) {
-        return self.map.get(key) orelse unreachable;
+        return Error.IdentifierRedecleration;
     } else {
         var local_key = std.ArrayList(u8).init(allocator);
         try local_key.appendSlice(key);
@@ -40,12 +56,21 @@ pub fn create(self: *SymbolTable, allocator: Allocator, key: []const u8) !Symbol
         const data = Symbol{
             .name = local_key_str,
             .index = self.current_index,
-            .scope = .global,
+            .scope = scope,
+            .type = tag,
         };
         try self.map.put(allocator, local_key_str, data);
         self.current_index += 1;
         return data;
     }
+}
+
+pub fn resolve(self: *SymbolTable, key: []const u8) !Symbol {
+    return self.map.get(key) orelse return Error.UnkownIdentifier;
+}
+
+pub fn resolvePtr(self: *SymbolTable, key: []const u8) !*Symbol {
+    return self.map.getPtr(key) orelse return Error.UnkownIdentifier;
 }
 
 pub fn print_env_hashmap_stderr(self: *SymbolTable) void {
