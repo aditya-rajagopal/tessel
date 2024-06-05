@@ -41,7 +41,7 @@ fn len(
     const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .string => {
-            const str_len: i64 = @as(i64, @intCast(arg_data.string_type.len));
+            const str_len: i64 = @as(i64, @intCast(arg_data.string_type.items.len));
             return eval.object_pool.create(allocator.*, .integer, @ptrCast(&str_len)) catch {
                 std.debug.panic("Something has gone horribly wrong. Could not allocate an object", .{});
             };
@@ -141,11 +141,11 @@ fn int(
     const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .string => {
-            const value = std.fmt.parseInt(i64, arg_data.string_type.ptr[0..arg_data.string_type.len], 10) catch {
+            const value = std.fmt.parseInt(i64, arg_data.string_type.items, 10) catch {
                 const output = std.fmt.allocPrint(
                     allocator.*,
                     "int() got an invalid string: {s}",
-                    .{arg_data.string_type.ptr[0..arg_data.string_type.len]},
+                    .{arg_data.string_type.items},
                 ) catch {
                     std.debug.panic("Something has gone horribly wrong. Could not allocate a string", .{});
                 };

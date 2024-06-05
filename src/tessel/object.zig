@@ -108,80 +108,9 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
         location = self.free_list.popOrNull() orelse unreachable;
     }
 
-    switch (tag) {
-        .integer => {
-            const value: *const i64 = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .integer;
-            self.object_pool.items(.data)[location].integer = value.*;
-        },
-        .return_expression => {
-            const value: *const ObjectIndex = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .return_expression;
-            self.object_pool.items(.data)[location].return_value = value.*;
-        },
-        .function_expression => {
-            const value: *const InternalObject.FunctionData = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .function_expression;
-            // const block = try allocator.alloc(Ast.Node.NodeIndex, value.block.len);
-            // const parameter = try allocator.alloc(Ast.Node.NodeIndex, value.parameters.len);
-            self.object_pool.items(.data)[location].function.block_ptr = value.block.ptr;
-            self.object_pool.items(.data)[location].function.block_len = @as(u32, @intCast(value.block.len));
-            self.object_pool.items(.data)[location].function.parameters_ptr = value.parameters.ptr;
-            self.object_pool.items(.data)[location].function.parameters_len = @as(u32, @intCast(value.parameters.len));
-            self.object_pool.items(.data)[location].function.env = value.env;
-            // @memcpy(self.object_pool.items(.data)[location].function.block_ptr, value.block);
-            // @memcpy(self.object_pool.items(.data)[location].function.parameters_ptr, value.parameters);
-        },
-        .runtime_error => {
-            const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .runtime_error;
-            // const string_ptr = try allocator.alloc(u8, value.len);
-            // self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
-            self.object_pool.items(.data)[location].string_type.ptr = value.ptr;
-            self.object_pool.items(.data)[location].string_type.len = value.len;
-            // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
-        },
-        .string => {
-            const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .string;
-            // const string_ptr = try allocator.alloc(u8, value.len);
-            // self.object_pool.items(.data)[location].string_type.ptr = string_ptr.ptr;
-            self.object_pool.items(.data)[location].string_type.ptr = value.ptr;
-            self.object_pool.items(.data)[location].string_type.len = value.len;
-            // @memcpy(self.object_pool.items(.data)[location].string_type.ptr, value.ptr[0..value.len]);
-        },
-        .array => {
-            const value: *const InternalObject.ArrayType = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .array;
-            self.object_pool.items(.data)[location].array = try allocator.create(std.ArrayListUnmanaged(ObjectIndex));
-            self.object_pool.items(.data)[location].array.* = .{};
-            try self.object_pool.items(.data)[location].array.appendSlice(allocator, value.data);
-        },
-        .hash_map => {
-            const value: *const u32 = @ptrCast(@alignCast(data));
-            self.object_pool.items(.tag)[location] = .hash_map;
-            self.object_pool.items(.data)[location].hash_map.map = try allocator.create(
-                std.AutoHashMapUnmanaged(
-                    InternalObject.HashKey,
-                    ObjectIndex,
-                ),
-            );
-            self.object_pool.items(.data)[location].hash_map.keys = try allocator.create(
-                std.ArrayListUnmanaged(
-                    ObjectIndex,
-                ),
-            );
-            self.object_pool.items(.data)[location].hash_map.map.* = .{};
-            self.object_pool.items(.data)[location].hash_map.keys.* = .{};
-            try self.object_pool.items(.data)[location].hash_map.map.ensureUnusedCapacity(allocator, value.*);
-            try self.object_pool.items(.data)[location].hash_map.keys.ensureUnusedCapacity(allocator, value.*);
-        },
-        .builtin => unreachable,
-        .null => unreachable,
-        .boolean => unreachable,
-        .break_statement => unreachable,
-        .continue_statement => unreachable,
-    }
+    const obj = try InternalObject.init(allocator, tag, data);
+    self.object_pool.items(.tag)[location] = obj.tag;
+    self.object_pool.items(.data)[location] = obj.data;
     self.object_pool.items(.refs)[location] = 0;
     try self.free_list.ensureTotalCapacity(allocator, self.object_pool.len);
     return location;
@@ -204,61 +133,28 @@ pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void
 }
 
 fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) bool {
-    const tag = self.object_pool.items(.tag)[position];
-    switch (tag) {
-        .integer => {},
-        .return_expression => {},
-        .function_expression => {
-            allocator.free(
-                self.object_pool.items(.data)[position].function.block_ptr[0..self.object_pool.items(.data)[position].function.block_len],
-            );
-            allocator.free(
-                self.object_pool.items(.data)[position].function.parameters_ptr[0..self.object_pool.items(.data)[position].function.parameters_len],
-            );
-            self.object_pool.items(.data)[position].function.block_len = 0;
-            self.object_pool.items(.data)[position].function.parameters_len = 0;
-        },
-        .runtime_error => {
-            allocator.free(
-                self.object_pool.items(.data)[position].string_type.ptr[0..self.object_pool.items(.data)[position].string_type.len],
-            );
-            self.object_pool.items(.data)[position].string_type.len = 0;
-        },
-        .string => {
-            allocator.free(
-                self.object_pool.items(.data)[position].string_type.ptr[0..self.object_pool.items(.data)[position].string_type.len],
-            );
-            self.object_pool.items(.data)[position].string_type.len = 0;
-        },
+    var obj = self.object_pool.get(position);
+    switch (obj.tag) {
         .hash_map => {
             const map = self.object_pool.items(.data)[position].hash_map.map;
             var value_iter = map.valueIterator();
             while (value_iter.next()) |value| {
                 self.free(allocator, value.*);
             }
-            map.deinit(allocator);
             const keys: *std.ArrayListUnmanaged(ObjectIndex) = self.object_pool.items(.data)[position].hash_map.keys;
             for (keys.items) |i| {
                 self.free(allocator, i);
             }
-            keys.deinit(allocator);
-            allocator.destroy(map);
-            allocator.destroy(keys);
         },
         .array => {
             const ptr = self.object_pool.items(.data)[position].array;
             for (ptr.items) |pos| {
                 self.free(allocator, pos);
             }
-            ptr.deinit(allocator);
-            allocator.destroy(ptr);
         },
-        .null => return false,
-        .boolean => return false,
-        .break_statement => return false,
-        .continue_statement => return false,
-        .builtin => return false,
+        else => {},
     }
+    obj.deinit(allocator);
     self.object_pool.items(.tag)[position] = .null;
     self.object_pool.items(.data)[position].integer = 0;
     return true;
@@ -298,11 +194,11 @@ pub fn ToString(self: *ObjectPool, buffer: []u8, position: ObjectIndex) ![]const
         },
         .string => {
             const data = self.get_data(position).string_type;
-            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
         },
         .runtime_error => {
             const data = self.get_data(position).runtime_error;
-            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .function_expression => return std.fmt.bufPrint(buffer, "Function@{d}", .{position}),
@@ -358,11 +254,11 @@ pub fn ObjectToString(obj: InternalObject, buffer: []u8) ![]const u8 {
         },
         .string => {
             const data = obj.data.string_type;
-            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
         },
         .runtime_error => {
             const data = obj.data.runtime_error;
-            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
@@ -409,10 +305,10 @@ pub fn print_object_pool_to_stderr(self: *ObjectPool) !void {
                 buf = try std.fmt.bufPrint(&buffer, "false", .{});
             },
             .string => {
-                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.string_type.ptr[0..data.string_type.len]});
+                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.string_type.items});
             },
             .runtime_error => {
-                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.runtime_error.ptr[0..data.runtime_error.len]});
+                buf = try std.fmt.bufPrint(&buffer, "{s}", .{data.runtime_error.items});
             },
             .null => buf = try std.fmt.bufPrint(&buffer, "null", .{}),
             .function_expression => buf = try std.fmt.bufPrint(&buffer, "Function@{d}", .{i}),
@@ -475,8 +371,8 @@ pub const InternalObject = struct {
         boolean: bool,
         return_value: ObjectIndex,
         function: FunctionExpression,
-        runtime_error: StringType,
-        string_type: StringType,
+        runtime_error: *std.ArrayListUnmanaged(u8),
+        string_type: *std.ArrayListUnmanaged(u8),
         builtin: BuiltInFn,
         array: *std.ArrayListUnmanaged(ObjectIndex),
         hash_map: HashData,
@@ -526,7 +422,7 @@ pub const InternalObject = struct {
                     }
                 },
                 .string => {
-                    const slice = key.data.string_type.ptr[0..key.data.string_type.len];
+                    const slice = key.data.string_type.items;
                     const hash = std.hash.Wyhash.hash(0, slice);
                     return .{
                         .type = .string_key,
@@ -560,6 +456,120 @@ pub const InternalObject = struct {
         ptr: [*]u8,
         len: u32,
     };
+
+    pub fn init(allocator: Allocator, tag: ObjectTypes, data: *const anyopaque) !InternalObject {
+        var object: InternalObject = undefined;
+        object.tag = tag;
+        switch (tag) {
+            .integer => {
+                const value: *const i64 = @ptrCast(@alignCast(data));
+                object.data.integer = value.*;
+            },
+            .return_expression => {
+                const value: *const ObjectIndex = @ptrCast(@alignCast(data));
+                object.data.return_value = value.*;
+            },
+            .function_expression => {
+                const value: *const InternalObject.FunctionData = @ptrCast(@alignCast(data));
+                object.data.function.block_ptr = value.block.ptr;
+                object.data.function.block_len = @as(u32, @intCast(value.block.len));
+                object.data.function.parameters_ptr = value.parameters.ptr;
+                object.data.function.parameters_len = @as(u32, @intCast(value.parameters.len));
+                object.data.function.env = value.env;
+            },
+            .runtime_error => {
+                const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
+                object.data.runtime_error = try allocator.create(std.ArrayListUnmanaged(u8));
+                object.data.runtime_error.* = .{};
+                try object.data.runtime_error.appendSlice(allocator, value.ptr[0..value.len]);
+                allocator.free(value.ptr[0..value.len]);
+            },
+            .string => {
+                const value: *const InternalObject.StringType = @ptrCast(@alignCast(data));
+                object.data.string_type = try allocator.create(std.ArrayListUnmanaged(u8));
+                object.data.string_type.* = .{};
+                try object.data.string_type.appendSlice(allocator, value.ptr[0..value.len]);
+                allocator.free(value.ptr[0..value.len]);
+            },
+            .array => {
+                const value: *const InternalObject.ArrayType = @ptrCast(@alignCast(data));
+                object.data.array = try allocator.create(std.ArrayListUnmanaged(ObjectIndex));
+                object.data.array.* = .{};
+                try object.data.array.appendSlice(allocator, value.data);
+            },
+            .hash_map => {
+                const value: *const u32 = @ptrCast(@alignCast(data));
+                object.data.hash_map.map = try allocator.create(
+                    std.AutoHashMapUnmanaged(
+                        InternalObject.HashKey,
+                        ObjectIndex,
+                    ),
+                );
+                object.data.hash_map.keys = try allocator.create(
+                    std.ArrayListUnmanaged(
+                        ObjectIndex,
+                    ),
+                );
+                object.data.hash_map.map.* = .{};
+                object.data.hash_map.keys.* = .{};
+                try object.data.hash_map.map.ensureUnusedCapacity(allocator, value.*);
+                try object.data.hash_map.keys.ensureUnusedCapacity(allocator, value.*);
+            },
+            .builtin => {
+                const value: *const BuiltInFn = @ptrCast(@alignCast(data));
+                object.data.builtin = value.*;
+            },
+            .null => {
+                object.data.integer = 0;
+            },
+            .boolean => {
+                const value: *const bool = @ptrCast(@alignCast(data));
+                object.data.boolean = value.*;
+            },
+            .break_statement => unreachable,
+            .continue_statement => unreachable,
+        }
+        return object;
+    }
+
+    pub fn deinit(self: *InternalObject, allocator: Allocator) void {
+        switch (self.tag) {
+            .function_expression => {
+                allocator.free(
+                    self.data.function.block_ptr[0..self.data.function.block_len],
+                );
+                allocator.free(
+                    self.data.function.parameters_ptr[0..self.data.function.parameters_len],
+                );
+                self.data.function.block_len = 0;
+                self.data.function.parameters_len = 0;
+            },
+            .runtime_error => {
+                const ptr = self.data.runtime_error;
+                ptr.deinit(allocator);
+                allocator.destroy(ptr);
+            },
+            .string => {
+                const ptr = self.data.string_type;
+                ptr.deinit(allocator);
+                allocator.destroy(ptr);
+            },
+            .hash_map => {
+                const map = self.data.hash_map.map;
+                map.deinit(allocator);
+                const keys: *std.ArrayListUnmanaged(ObjectIndex) = self.data.hash_map.keys;
+                keys.deinit(allocator);
+                allocator.destroy(map);
+                allocator.destroy(keys);
+            },
+            .array => {
+                const ptr = self.data.array;
+                ptr.deinit(allocator);
+                allocator.destroy(ptr);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const ObjectTypes = enum(u8) {
@@ -608,10 +618,10 @@ test "test_object" {
     const str_pos = try pool.create(allocator, .string, @ptrCast(&buf));
     try testing.expectEqual(reserved_objects + 1, str_pos);
     try testing.expectEqual(.string, pool.get_tag(str_pos));
-    try testing.expectEqual(27, pool.get_data(str_pos).string_type.len);
+    try testing.expectEqual(27, pool.get_data(str_pos).string_type.items.len);
     try testing.expectEqual(0, pool.free_list.items.len);
     const str = pool.get(str_pos).data.string_type;
-    try testing.expectEqualSlices(u8, buf, str.ptr[0..str.len]);
+    try testing.expectEqualSlices(u8, "This is a sample string 32\n", str.items);
 
     try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, str_pos);
@@ -624,10 +634,10 @@ test "test_object" {
 
     try testing.expectEqual(reserved_objects + 1, err_pos);
     try testing.expectEqual(.runtime_error, pool.get_tag(err_pos));
-    try testing.expectEqual(26, pool.get_data(err_pos).runtime_error.len);
+    try testing.expectEqual(26, pool.get_data(err_pos).runtime_error.items.len);
     try testing.expectEqual(0, pool.free_list.items.len);
     const err = pool.get(err_pos).data.runtime_error;
-    try testing.expectEqualSlices(u8, err_buf, err.ptr[0..err.len]);
+    try testing.expectEqualSlices(u8, "This is a sample Error 32\n", err.items);
 
     try testing.expectEqual(reserved_objects + 2, pool.object_pool.len);
     pool.free(allocator, err_pos);

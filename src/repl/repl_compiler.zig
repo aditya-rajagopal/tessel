@@ -89,8 +89,9 @@ pub fn start() !void {
                 try bw.flush();
                 continue;
             };
-
-            const outstr = try object.ObjectToString(vm.stack_pop(), &buffer);
+            var obj = vm.stack_pop();
+            const outstr = try object.ObjectToString(obj, &buffer);
+            obj.deinit(allocator);
             try stdout.print("Output >> {s}\n", .{outstr});
             try bw.flush();
         }

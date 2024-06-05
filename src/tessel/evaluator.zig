@@ -573,7 +573,7 @@ fn eval_index_range(
 
     const len = switch (literal_tag) {
         .array => @as(i64, @intCast(self.object_pool.get_data(literal).array.items.len)),
-        .string => @as(i64, @intCast(self.object_pool.get_data(literal).string_type.len)),
+        .string => @as(i64, @intCast(self.object_pool.get_data(literal).string_type.items.len)),
         else => unreachable,
     };
 
@@ -633,7 +633,7 @@ fn eval_index_range(
         },
         .string => {
             const string_data = self.object_pool.get_data(literal).string_type;
-            const out_str = try std.fmt.allocPrint(allocator, "{s}", .{string_data.ptr[left..right]});
+            const out_str = try std.fmt.allocPrint(allocator, "{s}", .{string_data.items});
             const return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
 
             return return_object;
@@ -711,7 +711,7 @@ fn eval_index_into(
         .string => {
             const index_value = self.object_pool.get_data(index).integer;
             const string_data = self.object_pool.get_data(literal).string_type;
-            const len = @as(i64, @intCast(string_data.len));
+            const len = @as(i64, @intCast(string_data.items.len));
             if (index_value >= len or index_value < -(len - 1)) {
                 const output = try std.fmt.allocPrint(
                     allocator,
@@ -724,11 +724,11 @@ fn eval_index_into(
             var return_object: ObjectIndex = null_object;
             if (index_value >= 0) {
                 const i = @as(usize, @intCast(index_value));
-                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.ptr[i]});
+                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.items[i]});
                 return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
             } else {
                 const i = @as(usize, @intCast(len + index_value));
-                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.ptr[i]});
+                const out_str = try std.fmt.allocPrint(allocator, "{c}", .{string_data.items[i]});
                 return_object = try self.object_pool.create(allocator, .string, @ptrCast(&out_str));
             }
 
@@ -1145,7 +1145,7 @@ fn eval_string_infix_operation(
             const outstr = try std.fmt.allocPrint(
                 allocator,
                 "{s}{s}",
-                .{ left_data.ptr[0..left_data.len], right_data.ptr[0..right_data.len] },
+                .{ left_data.items, right_data.items },
             );
             return self.object_pool.create(allocator, .string, @ptrCast(&outstr));
         },
