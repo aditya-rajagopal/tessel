@@ -7,7 +7,7 @@ symbol_table: *SymbolTable,
 allocator: Allocator,
 // temp_constants: []ObjectPool.InternalObject,
 
-pub const CompilerErrors = error{ IllegalAstNodeReference, ReferencingRootNode };
+pub const CompilerErrors = error{ IllegalAstNodeReference, ReferencingRootNode, AssigningToConst };
 const Error = CompilerErrors || Allocator.Error;
 
 pub fn init(allocator: Allocator, map: *SymbolTable) !Compiler {
@@ -77,7 +77,30 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
             if (is_last) {
                 return self.eval_expression(ast, ast_node.node_data.lhs);
             } else {
-                return;
+                const start = self.instructions.items.len;
+                const obj_start = self.constants.object_pool.len;
+                try self.eval_expression(ast, ast_node.node_data.lhs);
+                const end = self.instructions.items.len;
+                var i = start;
+                var is_modifying = false;
+                while (i < end) {
+                    const op: Code.Opcode = @enumFromInt(self.instructions.items[i]);
+                    if (op == .set_global) {
+                        is_modifying = true;
+                        break;
+                    }
+                    const value = Code.Definitions[@as(usize, @intCast(@intFromEnum(op)))];
+                    i += 1;
+                    for (value) |v| {
+                        i += v;
+                    }
+                }
+                if (!is_modifying) {
+                    self.instructions.shrinkRetainingCapacity(start);
+                    self.constants.object_pool.shrinkRetainingCapacity(obj_start);
+                    return;
+                }
+                try self.emit(.pop, &[_]u32{});
             }
         },
         .VAR_STATEMENT => {
@@ -85,8 +108,41 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
             const ident = ast.nodes.get(ast_node.node_data.lhs);
             try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
         },
+        .ASSIGNMENT_STATEMENT => {
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            const ident = ast.nodes.get(ast_node.node_data.lhs);
+            if (ident.node_data.rhs == 0) {
+                return Error.AssigningToConst;
+            }
+            try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
+        },
+        .WHILE_LOOP => {
+            // While loop
+            // main_token = while
+            // lhs = condition expression
+            // rhs = block to execute if lhs is true and then loop back to lhs condition
+            try self.eval_while_loop(ast, ast_node);
+        },
         else => unreachable,
     }
+}
+
+fn eval_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void {
+    const eval_start: u32 = @intCast(self.instructions.items.len);
+    try self.eval_expression(ast, node.node_data.lhs);
+    const jn_pos = self.instructions.items.len;
+    try self.emit(.jn, &[_]u32{9090});
+
+    const block_node_tag = ast.nodes.items(.tag)[node.node_data.rhs];
+    std.debug.assert(block_node_tag == .BLOCK);
+    const block_node_data = ast.nodes.items(.node_data)[node.node_data.rhs];
+    const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+    try self.compile_block_statements(ast, statements);
+
+    // const jmp_pos = self.instructions.items.len;
+    try self.emit(.jmp, &[_]u32{eval_start});
+
+    self.overwrite_jmp_pos(jn_pos, self.instructions.items.len);
 }
 
 fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) Error!void {
@@ -356,6 +412,32 @@ test "test_arithmatic_compile" {
             },
             .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
                 .{ .integer = 10 },
+            },
+        },
+        .{
+            .source = "var a = 10; a = 5",
+            .expected_instructions = &[_]u8{ 0, 12, 0, 16, 7, 0, 0, 13, 0, 16, 7, 0 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 10 },
+                .{ .integer = 5 },
+            },
+        },
+        .{
+            .source = "var i = 0; while (i < 5) { i = i + 1}",
+            .expected_instructions = &[_]u8{ 0, 12, 0, 16, 7, 0, 0, 13, 0, 17, 7, 0, 7, 14, 33, 0, 0, 0, 17, 7, 0, 0, 14, 0, 1, 16, 7, 0, 13, 6, 0, 0, 0 },
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
+                .integer,
+                .integer,
+                .integer,
+            },
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
+                .{ .integer = 0 },
+                .{ .integer = 5 },
+                .{ .integer = 1 },
             },
         },
     };

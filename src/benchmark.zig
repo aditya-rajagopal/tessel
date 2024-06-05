@@ -29,6 +29,19 @@ const tessel_fibonacci_35 =
 //     \\  fibonacci(35);
 // ;
 
+// const tessel_fibonacci_35 =
+//     \\     var left = 0;
+//     \\     var right = 1;
+//     \\     var temp = 0;
+//     \\     var i = 1;
+//     \\     while (i < 35) {
+//     \\          temp = left + right;
+//     \\          left = right;
+//     \\          right = temp;
+//     \\          i = i + 1;
+//     \\     }
+//     \\     right;
+// ;
 fn fibonacci(x: u32) u32 {
     if (x == 0) {
         return 0;
@@ -49,11 +62,24 @@ pub fn main() !void {
     //     const deinit_status = gpa.deinit();
     //     if (deinit_status == .leak) @panic("MEMORY LEAK");
     // }
-    var timer = try std.time.Timer.start();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
+    const value = args.next() orelse return run_evaluator(allocator);
+    if (std.mem.eql(u8, value, "--eval")) {
+        try run_evaluator(allocator);
+    } else if (std.mem.eql(u8, value, "--bytecode")) {
+        try run_compiler(allocator);
+    }
+}
+
+fn run_evaluator(allocator: std.mem.Allocator) !void {
     var buffer: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
     var eval = try Evaluator.init(allocator, global_env, &identifier_map);
@@ -76,10 +102,46 @@ pub fn main() !void {
     std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ outstr, std.fmt.fmtDuration(end_time) });
 }
 
+fn run_compiler(allocator: std.mem.Allocator) !void {
+    var buffer: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    var symbol_table = IdentifierMap.init();
+    defer symbol_table.deinit(allocator);
+    var compiler = try Compiler.init(allocator, &symbol_table);
+    defer compiler.deinit();
+    var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &symbol_table);
+    defer ast.deinit(allocator);
+
+    if (ast.errors.len > 0) {
+        try Parser.print_parser_errors_to_stderr(&ast);
+        return;
+    }
+    try compiler.compile(&ast, 0);
+    const byte_code: ByteCode = try compiler.get_byte_code();
+
+    var vm = try VM.init(allocator);
+    defer vm.deinit();
+    _ = try vm.run(byte_code, 0);
+
+    if (vm.stack_top()) |sptr| {
+        const obj = vm.stack.get(sptr - 1);
+
+        const outstr = try ObjectPool.ObjectToString(obj, &buffer);
+        const end_time = timer.read();
+        std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ outstr, std.fmt.fmtDuration(end_time) });
+    } else {
+        std.debug.print("Error! got no output", .{});
+    }
+}
+
 const lexer = @import("tessel/lexer.zig");
 const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
 const object = @import("tessel/object.zig");
 const Environment = @import("tessel/environment.zig");
 const IdentifierMap = @import("tessel/symbol_table.zig");
+const ObjectPool = @import("tessel/object.zig");
 const global_env = @import("tessel/environment_pool.zig").global_env;
+const Compiler = @import("tessel/compiler.zig");
+const ByteCode = @import("tessel/byte_code.zig");
+const VM = @import("tessel/vm.zig");

@@ -80,6 +80,7 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, 
     try parser.nodes.ensureTotalCapacity(allocator, estimated_nodes);
 
     try parser.begin_parsing();
+
     return Ast{
         .source_buffer = source_buffer,
         .tokens = tokens_local.toOwnedSlice(), //
@@ -167,9 +168,15 @@ fn parse_statement(self: *Parser, scope: SymbolTable.SymbolScope) !Ast.Node.Node
         },
         else => {
             if (self.is_current_token(.IDENT)) {
-                return try self.maybe_parse_assign_statement();
+                return self.maybe_parse_assign_statement() catch |err| switch (err) {
+                    Error.ParsingError => return null_node,
+                    else => |overflow| return overflow,
+                };
             } else {
-                return try self.parse_expression_statement();
+                return self.parse_expression_statement() catch |err| switch (err) {
+                    Error.ParsingError => return null_node,
+                    else => |overflow| return overflow,
+                };
             }
         },
     }

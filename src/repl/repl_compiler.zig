@@ -59,6 +59,7 @@ pub fn start() !void {
             try source_buffer.appendSlice(m);
             try source_buffer.append('\n');
             try source_buffer.append(0);
+            defer source_buffer.shrinkRetainingCapacity(0);
 
             try bw.flush();
             try stdout.print("\n", .{});
@@ -66,7 +67,12 @@ pub fn start() !void {
             var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &identifier_map);
             defer ast.deinit(allocator);
 
-            try Parser.print_parser_errors_to_stdout(&ast, stdout);
+            if (ast.errors.len > 0) {
+                try Parser.print_parser_errors_to_stdout(&ast, stdout);
+                try bw.flush();
+                continue;
+            }
+
             try compiler.compile(&ast, 0);
             const byte_code = try compiler.get_byte_code();
 
@@ -76,7 +82,6 @@ pub fn start() !void {
             try bw.flush();
 
             start_statement = @intCast(try vm.run(byte_code, start_statement));
-            source_buffer.shrinkRetainingCapacity(0);
 
             try stdout.print("{d}\n", .{byte_code.instructions});
             _ = vm.stack_top() orelse {

@@ -54,6 +54,13 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
             .lnull => {
                 try self.stack_push(byte_code.constants.get(ObjectPool.null_object));
             },
+            .pop => {
+                if (self.stack_ptr == 0) {
+                    index += 1;
+                    continue;
+                }
+                _ = self.stack_pop();
+            },
             .add,
             .sub,
             .mul,
@@ -342,6 +349,35 @@ test "run_if_expressions" {
     try run_vm_tests(&tests);
 }
 
+test "evaluate_while_loops" {
+    const tests = [_]VMTestCase{
+        .{ .source = "while (false) { 10; }", .expected = "null" },
+        .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .expected = "10" },
+        // .{
+        //     .source =
+        //     \\  const fn_call = fn(x) {
+        //     \\      const b = fn(y) {
+        //     \\          var a = y;
+        //     \\          while (a < x ) {
+        //     \\              a = a + 1;
+        //     \\              if ( a >= 10 ) {
+        //     \\                  break;
+        //     \\              }
+        //     \\          }
+        //     \\          return a;
+        //     \\      };
+        //     \\      return b;
+        //     \\  };
+        //     \\  const t = fn_call(20);
+        //     \\  t(10);
+        //     ,
+        //     .expected = "11",
+        // },
+    };
+
+    try run_vm_tests(&tests);
+}
+
 test "run_prefix_not" {
     const tests = [_]VMTestCase{
         .{
@@ -364,6 +400,30 @@ test "run_prefix_not" {
             .source = "!!!5",
             .expected = "false",
         },
+    };
+
+    try run_vm_tests(&tests);
+}
+
+test "evaluate_identifiers" {
+    const tests = [_]VMTestCase{
+        .{ .source = "const a = 10; a;", .expected = "10" },
+        .{ .source = "const a = 10; const b = 10; a;", .expected = "10" },
+        .{ .source = "const a = 10; const b = 11; a; b;", .expected = "11" },
+        .{ .source = "const a = 10; const b = 11; const c = a * b; b + c;", .expected = "121" },
+        .{ .source = "const a = 2 * 2; const b = a + 3; if ( a < b ) { a; } else { b; } ", .expected = "4" },
+        .{
+            .source = "const a = 2 * 2; const b = a + 3; const c = if ( a < b ) { a + 3; } else { b; }; c; ",
+            .expected = "7",
+        },
+        .{
+            .source = "var a = 2 * 2; const b = a + 3; if ( a < b ) { a = 5; } else { a = 2; }; a; ",
+            .expected = "5",
+        },
+        // .{
+        //     .source = "var a = 2 * 2; const b = a + 3; const c = if ( a < b ) { return a + 5; } else { return true; }; c; ",
+        //     .expected = "9",
+        // },
     };
 
     try run_vm_tests(&tests);
@@ -392,7 +452,7 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
             const outstr = try ObjectPool.ObjectToString(object, &buffer);
             try testing.expectEqualSlices(u8, t.expected, outstr);
         } else {
-            try testing.expectEqualSlices(u8, t.expected, "Error! stack empty");
+            try testing.expectEqualSlices(u8, t.expected, "null");
         }
     }
 }
