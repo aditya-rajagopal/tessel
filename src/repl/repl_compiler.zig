@@ -91,7 +91,7 @@ pub fn start() !void {
             };
             var obj = vm.stack_pop();
             const outstr = try object.ObjectToString(obj, &buffer);
-            obj.deinit(allocator, false);
+            obj.deinit(allocator);
             try stdout.print("Output >> {s}\n", .{outstr});
             try bw.flush();
         }
