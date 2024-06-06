@@ -117,6 +117,10 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
             try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
         },
         .WHILE_LOOP => {
+            // While loop
+            // main_token = while
+            // lhs = condition expression
+            // rhs = block to execute if lhs is true and then loop back to lhs condition
             try self.eval_while_loop(ast, ast_node);
         },
         else => unreachable,
@@ -169,15 +173,6 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
             } else {
                 try self.emit(.lfalse, &[_]u32{});
             }
-        },
-        .STRING_LITERAL => {
-            const output = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}",
-                .{ast.source_buffer[ast_node.node_data.lhs..ast_node.node_data.rhs]},
-            );
-            const obj = try self.constants.create(self.allocator, .string, @ptrCast(&output));
-            try self.emit(.load_const, &[_]u32{obj});
         },
         .GREATER_THAN,
         .GREATER_THAN_EQUAL,
@@ -315,12 +310,6 @@ const CompilerTest = struct {
 };
 
 test "test_arithmatic_compile" {
-    var str1 = std.ArrayListUnmanaged(u8){};
-    var str2 = std.ArrayListUnmanaged(u8){};
-    try str1.appendSlice(testing.allocator, "foo");
-    try str2.appendSlice(testing.allocator, "bar");
-    defer str1.deinit(testing.allocator);
-    defer str2.deinit(testing.allocator);
     const tests = [_]CompilerTest{
         .{
             .source = "1 + 2; 1 + 2",
@@ -333,6 +322,19 @@ test "test_arithmatic_compile" {
                 .{ .integer = 1 },
                 .{ .integer = 2 },
             },
+        },
+
+        .{
+            .source = "true",
+            .expected_instructions = &[_]u8{11},
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
+        },
+        .{
+            .source = "false",
+            .expected_instructions = &[_]u8{12},
+            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
+            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
         },
         .{
             .source = "1 - 2",
@@ -387,58 +389,6 @@ test "test_arithmatic_compile" {
             },
         },
         .{
-            .source = "\"foo\" + \"bar\"",
-            .expected_instructions = &[_]u8{ 0, 12, 0, 0, 13, 0, 1 },
-            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
-                .string,
-                .string,
-            },
-            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
-                .{ .string_type = &str1 },
-                .{ .string_type = &str2 },
-            },
-        },
-    };
-
-    try test_compiler(&tests);
-}
-
-test "test_literals" {
-    var str1 = std.ArrayListUnmanaged(u8){};
-    try str1.appendSlice(testing.allocator, "foobar");
-    defer str1.deinit(testing.allocator);
-
-    const tests = [_]CompilerTest{
-        .{
-            .source = "true",
-            .expected_instructions = &[_]u8{11},
-            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
-            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
-        },
-        .{
-            .source = "false",
-            .expected_instructions = &[_]u8{12},
-            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{},
-            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{},
-        },
-        .{
-            .source = "\"foobar\"",
-            .expected_instructions = &[_]u8{ 0, 12, 0 },
-            .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
-                .string,
-            },
-            .expected_data = &[_]ObjectPool.InternalObject.ObjectData{
-                .{ .string_type = &str1 },
-            },
-        },
-    };
-
-    try test_compiler(&tests);
-}
-
-test "test_if_statements" {
-    const tests = [_]CompilerTest{
-        .{
             .source = "if (1 < 2) { 10; } else { 50; 60;}",
             .expected_instructions = &[_]u8{ 0, 12, 0, 0, 13, 0, 7, 14, 20, 0, 0, 0, 0, 14, 0, 13, 23, 0, 0, 0, 0, 15, 0 },
             .expected_constant_tags = &[_]ObjectPool.ObjectTypes{
@@ -464,13 +414,6 @@ test "test_if_statements" {
                 .{ .integer = 10 },
             },
         },
-    };
-
-    try test_compiler(&tests);
-}
-
-test "test_var_statements" {
-    const tests = [_]CompilerTest{
         .{
             .source = "var a = 10; a = 5",
             .expected_instructions = &[_]u8{ 0, 12, 0, 16, 7, 0, 0, 13, 0, 16, 7, 0 },
@@ -531,11 +474,6 @@ fn test_compiler(tests: []const CompilerTest) !void {
                     t.expected_data[i - compiler.constants.reserved].integer,
                     byte_code.constants.items(.data)[i].integer,
                 ),
-                .string => {
-                    const data = t.expected_data[i - compiler.constants.reserved].string_type;
-                    const byte = byte_code.constants.items(.data)[i].string_type;
-                    try testing.expectEqualSlices(u8, data.items, byte.items);
-                },
                 else => unreachable,
             }
         }

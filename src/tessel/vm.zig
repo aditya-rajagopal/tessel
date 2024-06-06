@@ -79,9 +79,6 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
                     .integer => {
                         try self.eval_int_infix(op, right.data.integer);
                     },
-                    .string => {
-                        try self.eval_string_infix(op, right);
-                    },
                     else => return VMError.TypeMismatch,
                 }
             },
@@ -155,28 +152,6 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
         index += 1;
     }
     return index;
-}
-
-fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: ObjectPool.InternalObject) !void {
-    _ = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-    const lhs = self.stack_pop();
-    switch (op) {
-        .add => {
-            const outstr = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}{s}",
-                .{
-                    lhs.data.string_type.items,
-                    rhs.data.string_type.items,
-                },
-            );
-            const obj = try ObjectPool.InternalObject.init(self.allocator, .string, @ptrCast(&outstr));
-            try self.stack_push(obj);
-        },
-        else => {
-            return VMError.TypeMismatch;
-        },
-    }
 }
 
 fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
