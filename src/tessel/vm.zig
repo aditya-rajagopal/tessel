@@ -43,7 +43,9 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
             .load_const => {
                 const obj_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
                 index += 2;
-                try self.stack_push(byte_code.constants.get(obj_index));
+                var obj = byte_code.constants.get(obj_index);
+                obj.refs += 1;
+                try self.stack_push(obj);
             },
             .ltrue => {
                 try self.stack_push(byte_code.constants.get(ObjectPool.true_object));
@@ -59,7 +61,8 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
                     index += 1;
                     continue;
                 }
-                _ = self.stack_pop();
+                var obj = self.stack_pop();
+                obj.deinit(self.allocator, false);
             },
             .add,
             .sub,
@@ -68,7 +71,9 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
             .geq,
             .gt,
             => {
-                const right = self.stack_pop();
+                var right = self.stack_pop();
+                defer right.deinit(self.allocator, false);
+
                 const right_tag = right.tag;
                 const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
                 const left_tag = self.stack.items(.tag)[sptr - 1];
@@ -148,8 +153,9 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
             .get_global => {
                 const var_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
                 index += 2;
-
-                try self.stack_push(self.globals[var_index]);
+                var obj = self.globals[var_index];
+                obj.refs += 1;
+                try self.stack_push(obj);
             },
         }
         index += 1;
@@ -159,7 +165,8 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
 
 fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: ObjectPool.InternalObject) !void {
     _ = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-    const lhs = self.stack_pop();
+    var lhs = self.stack_pop();
+    defer lhs.deinit(self.allocator, false);
     switch (op) {
         .add => {
             const outstr = try std.fmt.allocPrint(
@@ -171,6 +178,16 @@ fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: ObjectPool.InternalObject)
                 },
             );
             const obj = try ObjectPool.InternalObject.init(self.allocator, .string, @ptrCast(&outstr));
+            try self.stack_push(obj);
+        },
+        .eq => {
+            const result = std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
+            const obj = try ObjectPool.InternalObject.init(self.allocator, .boolean, @ptrCast(&result));
+            try self.stack_push(obj);
+        },
+        .neq => {
+            const result = !std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
+            const obj = try ObjectPool.InternalObject.init(self.allocator, .boolean, @ptrCast(&result));
             try self.stack_push(obj);
         },
         else => {
@@ -210,8 +227,12 @@ fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
 }
 
 fn eval_eq(self: *VM, op: Code.Opcode) !void {
-    const right = self.stack_pop();
+    var right = self.stack_pop();
+    defer right.deinit(self.allocator, false);
     const right_tag = right.tag;
+    if (right_tag == .string) {
+        return self.eval_string_infix(op, right);
+    }
     const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
     const left_tag = self.stack.items(.tag)[sptr - 1];
     if (left_tag == .integer and right_tag == .integer) {
@@ -454,6 +475,35 @@ test "evaluate_identifiers" {
     try run_vm_tests(&tests);
 }
 
+test "evaluate_string_expressions" {
+    const tests = [_]VMTestCase{
+        .{ .source = "\"foobar\"", .expected = "foobar" },
+        .{ .source = "const a = \"foobar\"; a;", .expected = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .expected = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .expected = "foobar" },
+        // .{
+        //     .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
+        //     .expected = "foobaz barbaz",
+        // },
+        // .{
+        //     .source =
+        //     \\  const fn_call = fn(x) {
+        //     \\      const b = fn(y) {
+        //     \\          x + y
+        //     \\      };
+        //     \\      return b;
+        //     \\  };
+        //     \\  const add_foo = fn_call("foo");
+        //     \\  add_foo("bar");
+        //     ,
+        //     .expected = "foobar",
+        // },
+        // .{ .source = "\"foobar\"[-1]", .expected = "r" },
+    };
+
+    try run_vm_tests(&tests);
+}
+
 fn run_vm_tests(tests: []const VMTestCase) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {
@@ -471,11 +521,12 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
         defer vm.deinit();
         _ = try vm.run(byte_code, 0);
 
-        if (vm.stack_top()) |sptr| {
-            const object = vm.stack.get(sptr - 1);
+        if (vm.stack_top()) |_| {
+            var object = vm.stack_pop();
 
             const outstr = try ObjectPool.ObjectToString(object, &buffer);
             try testing.expectEqualSlices(u8, t.expected, outstr);
+            object.deinit(testing.allocator, false);
         } else {
             try testing.expectEqualSlices(u8, t.expected, "null");
         }

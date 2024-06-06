@@ -60,7 +60,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
 
 pub fn deinit(self: *ObjectPool, allocator: Allocator) void {
     for (0..self.object_pool.len) |i| {
-        _ = self.free_possible_memory(allocator, @as(u32, @intCast(i)));
+        _ = self.free_possible_memory(allocator, @as(u32, @intCast(i)), true);
     }
     self.object_pool.deinit(allocator);
     self.free_list.deinit(allocator);
@@ -125,14 +125,14 @@ pub fn free(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) void
         return;
     }
     if (self.object_pool.items(.refs)[position] == 0) {
-        _ = self.free_possible_memory(allocator, position);
+        _ = self.free_possible_memory(allocator, position, false);
         self.free_list.appendAssumeCapacity(position);
     } else {
         self.object_pool.items(.refs)[position] -= 1;
     }
 }
 
-fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: ObjectIndex) bool {
+fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: ObjectIndex, override_ref: bool) bool {
     var obj = self.object_pool.get(position);
     switch (obj.tag) {
         .hash_map => {
@@ -154,7 +154,7 @@ fn free_possible_memory(self: *ObjectPool, allocator: Allocator, position: Objec
         },
         else => {},
     }
-    obj.deinit(allocator);
+    obj.deinit(allocator, override_ref);
     self.object_pool.items(.tag)[position] = .null;
     self.object_pool.items(.data)[position].integer = 0;
     return true;
@@ -460,6 +460,7 @@ pub const InternalObject = struct {
     pub fn init(allocator: Allocator, tag: ObjectTypes, data: *const anyopaque) !InternalObject {
         var object: InternalObject = undefined;
         object.tag = tag;
+        object.refs = 0;
         switch (tag) {
             .integer => {
                 const value: *const i64 = @ptrCast(@alignCast(data));
@@ -532,7 +533,11 @@ pub const InternalObject = struct {
         return object;
     }
 
-    pub fn deinit(self: *InternalObject, allocator: Allocator) void {
+    pub fn deinit(self: *InternalObject, allocator: Allocator, override_ref: bool) void {
+        if (self.refs != 0 and !override_ref) {
+            self.refs -= 1;
+            return;
+        }
         switch (self.tag) {
             .function_expression => {
                 allocator.free(
@@ -569,6 +574,9 @@ pub const InternalObject = struct {
             },
             else => {},
         }
+        self.tag = .null;
+        self.refs = 0;
+        self.data.integer = 0;
     }
 };
 
