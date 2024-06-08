@@ -457,7 +457,6 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
     }
 }
 
-const ObjectPool = @import("object.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -466,6 +465,7 @@ const Ast = @import("ast.zig");
 const Code = @import("code.zig");
 const Parser = @import("parser.zig");
 const SymbolTable = @import("symbol_table.zig");
+const ObjectPool = @import("object.zig");
 const ObjectTypes = ObjectPool.ObjectTypes;
 const ObjectIndex = ObjectPool.ObjectIndex;
 const ByteCode = @import("byte_code.zig");
