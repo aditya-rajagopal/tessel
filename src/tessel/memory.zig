@@ -21,7 +21,7 @@ pub const GlobalID = u32;
 pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
 
-pub const stack_limit = 2048;
+pub const stack_limit = 8;
 pub const globals_limit = 4096;
 pub const instruction_init_size = 4096;
 
@@ -120,7 +120,13 @@ pub fn deinit(self: *Memory) void {
     self.allocator.free(self.globals);
     self.instructions.deinit();
     self.constants.deinit(self.allocator);
+
     for (0..self.memory.len) |i| {
+        const memory_slice = self.memory.slice();
+        const tag = memory_slice.items(.tag)[i];
+        if ((tag == .constant or tag == .heap) and i < stack_limit) {
+            continue;
+        }
         self.destroy(@as(MemoryAddress, @intCast(i)));
     }
     self.memory.deinit(self.allocator);
@@ -242,6 +248,19 @@ pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const
     self.memory.items(.refs)[location] = 0;
 }
 
+pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
+    const data = self.get(addr);
+
+    switch (data.dtype) {
+        .string => {
+            var output = try data.data.string_type.clone(self.allocator);
+            const obj = try self.alloc(.string, @ptrCast(&output.toOwnedSlice(self.allocator)));
+            return obj;
+        },
+        inline else => return addr,
+    }
+}
+
 pub fn free(self: *Memory, ptr: MemoryAddress) void {
     std.debug.assert(ptr <= self.memory.len);
     // std.debug.assert(ptr >= stack_limit);
@@ -327,6 +346,7 @@ pub fn get_constant(self: *Memory, id: ConstantID) MemoryObject {
 
 // Give ownership of top of stack to global id
 pub fn set_global(self: *Memory, id: GlobalID) Error!void {
+    // TODO: WHen you want to set a global constant variable just point to the constant
     std.debug.assert(id < globals_limit);
 
     var ptr = self.globals[id];
@@ -336,9 +356,9 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
     var memory_slice = self.memory.slice();
 
     if (ptr > reserved_objects) {
-        if (memory_slice.items(.tag)[ptr] != .constant) {
-            self.free(ptr);
-        }
+        // if (memory_slice.items(.tag)[ptr] != .constant) {
+        self.free(ptr);
+        // }
     }
 
     switch (data.dtype) {
@@ -362,15 +382,21 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
         else => {},
     }
 
+    if (data.tag == .constant) {
+        ptr = try self.dupe(self.stack_ptr);
+    }
+
     if (ptr < self.reserved_memory) {
         const dummy: i64 = @intCast(id);
         ptr = try self.alloc(.integer, @ptrCast(&dummy));
+        self.globals[id] = ptr;
+        memory_slice = self.memory.slice();
+        memory_slice.set(ptr, data);
+    } else {
+        self.globals[id] = ptr;
     }
 
-    self.globals[id] = ptr;
-
     memory_slice = self.memory.slice();
-    memory_slice.set(ptr, data);
     memory_slice.items(.data)[self.stack_ptr].integer = 0;
     memory_slice.items(.dtype)[self.stack_ptr] = .null;
 }
@@ -379,6 +405,7 @@ pub fn get_global(self: *Memory, id: GlobalID) !void {
     std.debug.assert(id < globals_limit);
     const ptr = self.globals[id];
     std.debug.assert(ptr != stack_limit);
+    self.increase_ref(ptr);
     try self.stack_push(self.get(ptr));
 }
 
@@ -432,7 +459,7 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
     }
 
     memory_slice.set(self.stack_ptr, element);
-    memory_slice.items(.tag)[self.stack_ptr] = .stack;
+    memory_slice.items(.tag)[self.stack_ptr] = element.tag;
     self.stack_ptr += 1;
 }
 
@@ -442,12 +469,16 @@ pub fn stack_push_create(self: *Memory, dtype: Types, data: *const anyopaque) Er
     }
     var memory_slice = self.memory.slice();
     const stack_ptr_dtype = memory_slice.items(.dtype)[self.stack_ptr];
-    switch (stack_ptr_dtype) {
-        .string, .array, .hash_map => self.free(self.stack_ptr),
-        else => {},
+    const stack_ptr_tag = memory_slice.items(.tag)[self.stack_ptr];
+    if (stack_ptr_tag != .heap) {
+        switch (stack_ptr_dtype) {
+            .string, .array, .hash_map => self.free(self.stack_ptr),
+            else => {},
+        }
     }
 
     try self.create(self.stack_ptr, dtype, data);
+    memory_slice.items(.tag)[self.stack_ptr] = .stack;
     self.stack_ptr += 1;
 }
 

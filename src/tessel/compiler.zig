@@ -98,10 +98,6 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
             try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
         },
         .WHILE_LOOP => {
-            // While loop
-            // main_token = while
-            // lhs = condition expression
-            // rhs = block to execute if lhs is true and then loop back to lhs condition
             try self.eval_while_loop(ast, ast_node);
         },
         else => unreachable,
@@ -120,7 +116,6 @@ fn eval_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void 
     const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
     try self.compile_block_statements(ast, statements);
 
-    // const jmp_pos = self.memory.instructions.items.len;
     try self.emit(.jmp, &[_]u32{eval_start});
 
     self.overwrite_jmp_pos(jn_pos, self.memory.instructions.items.len);
@@ -142,6 +137,15 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
                 .integer,
                 @ptrCast(&ast.integer_literals[ast_node.node_data.lhs]),
             );
+            try self.emit(.load_const, &[_]u32{obj});
+        },
+        .STRING_LITERAL => {
+            const output = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}",
+                .{ast.source_buffer[ast_node.node_data.lhs..ast_node.node_data.rhs]},
+            );
+            const obj = try self.memory.register_constant(.string, @ptrCast(&output));
             try self.emit(.load_const, &[_]u32{obj});
         },
         .IDENTIFIER => {
@@ -290,6 +294,12 @@ const CompilerTest = struct {
 };
 
 test "test_arithmatic_compile" {
+    var str1 = std.ArrayListUnmanaged(u8){};
+    var str2 = std.ArrayListUnmanaged(u8){};
+    try str1.appendSlice(testing.allocator, "foo");
+    try str2.appendSlice(testing.allocator, "bar");
+    defer str1.deinit(testing.allocator);
+    defer str2.deinit(testing.allocator);
     const tests = [_]CompilerTest{
         .{
             .source = "1 + 2; 1 + 2",

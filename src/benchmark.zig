@@ -29,19 +29,19 @@ const tessel_fibonacci_35 =
 //     \\  fibonacci(35);
 // ;
 
-// const tessel_fibonacci_35 =
-//     \\     var left = 0;
-//     \\     var right = 1;
-//     \\     var temp = 0;
-//     \\     var i = 1;
-//     \\     while (i < 35) {
-//     \\          temp = left + right;
-//     \\          left = right;
-//     \\          right = temp;
-//     \\          i = i + 1;
-//     \\     }
-//     \\     right;
-// ;
+const tessel_fibonacci_35_loop =
+    \\     var left = 0;
+    \\     var right = 1;
+    \\     var temp = 0;
+    \\     var i = 1;
+    \\     while (i < 35) {
+    \\          temp = left + right;
+    \\          left = right;
+    \\          right = temp;
+    \\          i = i + 1;
+    \\     }
+    \\     right;
+;
 
 fn fibonacci(x: u32) u32 {
     if (x == 0) {
@@ -82,7 +82,7 @@ pub fn main() !void {
                 var vm = try VM.init(allocator, false);
                 defer vm.deinit();
 
-                var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &symbol_table);
+                var ast = try Parser.parse_program(tessel_fibonacci_35_loop, allocator, &symbol_table);
                 defer ast.deinit(allocator);
 
                 if (ast.errors.len > 0) {

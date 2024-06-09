@@ -57,9 +57,8 @@ pub fn run(self: *VM) !void {
                 const right = try self.memory.stack_pop();
                 const right_tag = right.dtype;
                 switch (right_tag) {
-                    .integer => {
-                        try self.eval_int_infix(op, right.data.integer);
-                    },
+                    .integer => try self.eval_int_infix(op, right.data.integer),
+                    .string => try self.eval_string_infix(op, right),
                     else => return VMError.TypeMismatch,
                 }
             },
@@ -139,6 +138,38 @@ pub fn run(self: *VM) !void {
     }
 }
 
+fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: Memory.MemoryObject) !void {
+    // const memory_slice = self.memory.memory.slice();
+    // const dtype_slice = memory_slice.items(.dtype);
+    // const data_slice = memory_slice.items(.data);
+    const lhs = try self.memory.stack_pop();
+
+    switch (op) {
+        .add => {
+            const outstr = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}{s}",
+                .{
+                    lhs.data.string_type.items,
+                    rhs.data.string_type.items,
+                },
+            );
+            try self.memory.stack_push_create(.string, @ptrCast(&outstr));
+        },
+        .eq => {
+            const result = std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
+            try self.memory.stack_push_create(.boolean, @ptrCast(&result));
+        },
+        .neq => {
+            const result = !std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
+            try self.memory.stack_push_create(.boolean, @ptrCast(&result));
+        },
+        else => {
+            return VMError.TypeMismatch;
+        },
+    }
+}
+
 fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
     const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
     const memory_slice = self.memory.memory.slice();
@@ -179,6 +210,10 @@ fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
 fn eval_eq(self: *VM, op: Code.Opcode) !void {
     const right = try self.memory.stack_pop();
     const right_tag = right.dtype;
+    if (right_tag == .string) {
+        try self.eval_string_infix(op, right);
+        return;
+    }
     const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
 
     const memory_slice = self.memory.memory.slice();
@@ -324,6 +359,34 @@ test "run_if_expressions" {
 
     try run_vm_tests(&tests);
 }
+test "evaluate_string_expressions" {
+    const tests = [_]VMTestCase{
+        .{ .source = "\"foobar\"", .expected = "foobar" },
+        .{ .source = "const a = \"foobar\"; a;", .expected = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .expected = "foobar" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .expected = "foobar" },
+        // .{
+        //     .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
+        //     .expected = "foobaz barbaz",
+        // },
+        // .{
+        //     .source =
+        //     \\  const fn_call = fn(x) {
+        //     \\      const b = fn(y) {
+        //     \\          x + y
+        //     \\      };
+        //     \\      return b;
+        //     \\  };
+        //     \\  const add_foo = fn_call("foo");
+        //     \\  add_foo("bar");
+        //     ,
+        //     .expected = "foobar",
+        // },
+        // .{ .source = "\"foobar\"[-1]", .expected = "r" },
+    };
+
+    try run_vm_tests(&tests);
+}
 
 test "evaluate_while_loops" {
     const tests = [_]VMTestCase{
@@ -408,6 +471,7 @@ test "evaluate_identifiers" {
 fn run_vm_tests(tests: []const VMTestCase) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {
+        // std.debug.print("Source: {s}\n", .{t.source});
         var symbol_table = SymbolTable.init();
         defer symbol_table.deinit(testing.allocator);
         var vm = try VM.init(testing.allocator, false);
@@ -419,12 +483,16 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
         var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
         try compiler.compile(&ast, 0);
 
+        // const out = try Code.code_to_str(testing.allocator, vm.memory.instructions.items);
+        // defer testing.allocator.free(out);
+        // std.debug.print("Instructions:\n{s}\n", .{out});
         try vm.run();
 
-        if (vm.memory.stack_top()) |sptr| {
-            const object = vm.memory.memory.get(sptr - 1);
+        if (vm.memory.stack_top()) |_| {
+            const object = try vm.memory.stack_pop();
 
             const outstr = try Memory.ObjectToString(object, &buffer);
+            // std.debug.print("Output: {s}\n", .{outstr});
             try testing.expectEqualSlices(u8, t.expected, outstr);
         } else {
             try testing.expectEqualSlices(u8, t.expected, "null");
