@@ -66,6 +66,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
     try pool.memory.resize(allocator, stack_limit + internal_capacity);
     var memory_slice = pool.memory.slice();
     const tag_slice = memory_slice.items(.tag);
+
     @memset(tag_slice, .stack);
     @memset(memory_slice.items(.dtype), .null);
     @memset(memory_slice.items(.refs), 0);
@@ -76,14 +77,6 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
         const loc = @as(MemoryAddress, @intCast(stack_limit + internal_capacity - 1 - i));
         pool.free_list.appendAssumeCapacity(loc);
         tag_slice[loc] = .heap;
-        // pool.memory.appendAssumeCapacity(
-        //     MemoryObject{
-        //         .tag = .heap,
-        //         .dtype = .null,
-        //         .data = .{ .integer = 0 },
-        //         .refs = 0,
-        //     },
-        // );
     }
 
     // 0 will always be a null node and will be referenced when .null is needed
@@ -126,7 +119,6 @@ pub fn deinit(self: *Memory) void {
 }
 
 pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress {
-    // var timer = std.time.Timer.start() catch unreachable;
     if (dtype == .null) {
         return null_object;
     }
@@ -160,9 +152,6 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
             return false_object;
         }
     }
-    // var end = timer.read();
-    // std.debug.print("Time to do checks: {s}\n", .{std.fmt.fmtDuration(end)});
-    // end = timer.read();
 
     var location: MemoryAddress = 0;
     if (self.free_list.items.len == 0) {
@@ -170,19 +159,9 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
     } else {
         location = self.free_list.popOrNull() orelse unreachable;
     }
-    // end = timer.read() - end;
-    // std.debug.print("Time to get location: {s}\n", .{std.fmt.fmtDuration(end)});
-    // end = timer.read();
-
     try self.create(location, dtype, data);
-    // end = timer.read() - end;
-    // std.debug.print("Time to create variable: {s}\n", .{std.fmt.fmtDuration(end)});
-    // end = timer.read();
 
     try self.free_list.ensureTotalCapacity(self.allocator, self.memory.len - stack_limit + 1);
-    // end = timer.read() - end;
-    // std.debug.print("Time ensure Total capacity: {s}\n", .{std.fmt.fmtDuration(end)});
-    // std.debug.print("Time in alloc: {s}\n", .{std.fmt.fmtDuration(timer.read())});
     return location;
 }
 
@@ -328,6 +307,7 @@ fn destroy(self: *Memory, ptr: MemoryAddress) void {
 
 pub fn register_constant(self: *Memory, dtype: Types, data: *const anyopaque) !ConstantID {
     const ptr = try self.alloc(dtype, data);
+    self.memory.items(.tag)[ptr] = .constant;
     try self.constants.append(self.allocator, ptr);
     return @as(ConstantID, @intCast(self.constants.items.len - 1));
 }
