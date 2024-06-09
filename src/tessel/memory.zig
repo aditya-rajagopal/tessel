@@ -22,7 +22,7 @@ pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
 
 pub const stack_limit = 2048;
-pub const globals_limit = 2048;
+pub const globals_limit = 4096;
 pub const instruction_init_size = 4096;
 
 pub const null_object: MemoryAddress = stack_limit + 0;

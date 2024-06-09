@@ -7,8 +7,6 @@ pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch };
 pub const Error = VMError || Allocator.Error;
 
 pub const memory_reservation = 65536;
-pub const stack_limit = 2048;
-pub const globals_size = 65536;
 
 pub fn init(allocator: Allocator, reserve_memory: bool) !VM {
     return VM{
