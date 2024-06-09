@@ -22,7 +22,7 @@ pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
 
 pub const stack_limit = 2048;
-pub const globals_limit = 65536;
+pub const globals_limit = 2048;
 pub const instruction_init_size = 4096;
 
 pub const null_object: MemoryAddress = stack_limit + 0;
@@ -66,11 +66,14 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
     try pool.memory.resize(allocator, stack_limit + internal_capacity);
     var memory_slice = pool.memory.slice();
     const tag_slice = memory_slice.items(.tag);
+    const dtype_slice = memory_slice.items(.dtype);
+    const data_slice = memory_slice.items(.data);
+    const ref_slice = memory_slice.items(.refs);
 
     @memset(tag_slice, .stack);
     @memset(memory_slice.items(.dtype), .null);
-    @memset(memory_slice.items(.refs), 0);
-    @memset(memory_slice.items(.data), MemoryObject.ObjectData{ .integer = 0 });
+    // @memset(memory_slice.items(.refs), 0);
+    // @memset(memory_slice.items(.data), MemoryObject.ObjectData{ .integer = 0 });
     @memset(pool.globals, stack_limit);
 
     for (0..internal_capacity) |i| {
@@ -81,27 +84,32 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
 
     // 0 will always be a null node and will be referenced when .null is needed
     const null_loc = pool.free_list.popOrNull() orelse unreachable;
-    pool.memory.items(.tag)[null_loc] = .reserved;
+    tag_slice[null_loc] = .reserved;
+    ref_slice[null_loc] = 0;
 
     // 1 will be the true node and again will be referenced
     const true_loc = pool.free_list.popOrNull() orelse unreachable;
-    pool.memory.items(.tag)[true_loc] = .reserved;
-    pool.memory.items(.dtype)[true_loc] = .boolean;
-    pool.memory.items(.data)[true_loc].boolean = true;
+    tag_slice[true_loc] = .reserved;
+    dtype_slice[true_loc] = .boolean;
+    data_slice[true_loc].boolean = true;
+    ref_slice[true_loc] = 0;
 
     // 2 will be the false node and again will be referenced
     const false_loc = pool.free_list.popOrNull() orelse unreachable;
-    pool.memory.items(.tag)[false_loc] = .reserved;
-    pool.memory.items(.dtype)[false_loc] = .boolean;
-    pool.memory.items(.data)[false_loc].boolean = false;
+    tag_slice[false_loc] = .reserved;
+    dtype_slice[false_loc] = .boolean;
+    data_slice[false_loc].boolean = false;
+    ref_slice[false_loc] = 0;
 
     const break_loc = pool.free_list.popOrNull() orelse unreachable;
-    pool.memory.items(.tag)[break_loc] = .reserved;
-    pool.memory.items(.dtype)[break_loc] = .break_statement;
+    tag_slice[break_loc] = .reserved;
+    dtype_slice[break_loc] = .break_statement;
+    ref_slice[break_loc] = 0;
 
     const continue_loc = pool.free_list.popOrNull() orelse unreachable;
-    pool.memory.items(.tag)[continue_loc] = .reserved;
-    pool.memory.items(.dtype)[continue_loc] = .continue_statement;
+    tag_slice[continue_loc] = .reserved;
+    dtype_slice[continue_loc] = .continue_statement;
+    ref_slice[continue_loc] = 0;
     return pool;
 }
 
@@ -182,7 +190,7 @@ pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const
         .function_expression => {
             const value: *const MemoryObject.FunctionExpression = @ptrCast(@alignCast(data));
             memory_dtype[location] = .function_expression;
-            memory_data[location].function.instruction_ptr = value.instruction_ptr;
+            // memory_data[location].function.instruction_ptr = value.instruction_ptr;
             memory_data[location].function.env = value.env;
         },
         .runtime_error => {
@@ -540,7 +548,7 @@ pub const MemoryObject = struct {
 
     const FunctionExpression = extern struct {
         env: StackFrame,
-        instruction_ptr: u32,
+        // instruction_ptr: u32,
     };
 
     pub const ArrayType = struct {
@@ -603,8 +611,9 @@ pub fn ObjectToString(obj: MemoryObject, buffer: []u8) ![]const u8 {
 }
 
 pub const StackFrame = extern struct {
-    stack_start_ptr: u32,
-    parent: FrameIndex,
+    frame_len: u32,
+    frame: [*]MemoryObject,
+    // parent: FrameIndex,
 };
 
 test "Memory init" {
