@@ -4,7 +4,7 @@ memory: Memory,
 allocator: Allocator,
 
 pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch };
-pub const Error = VMError || Allocator.Error;
+pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
 pub const memory_reservation = 65536;
 

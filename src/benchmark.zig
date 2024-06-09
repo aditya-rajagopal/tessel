@@ -1,20 +1,20 @@
 const std = @import("std");
 const repl = @import("repl/repl.zig");
 
-// const tessel_fibonacci_35 =
-//     \\  const fibonacci = fn(x) {
-//     \\      if ( x == 0 ) {
-//     \\          return 0;
-//     \\      } else {
-//     \\          if ( x == 1 ) {
-//     \\              return 1;
-//     \\          } else {
-//     \\              return fibonacci(x - 1) + fibonacci(x - 2);
-//     \\          }
-//     \\      }
-//     \\  }
-//     \\  fibonacci(35);
-// ;
+const tessel_fibonacci_35 =
+    \\  const fibonacci = fn(x) {
+    \\      if ( x == 0 ) {
+    \\          return 0;
+    \\      } else {
+    \\          if ( x == 1 ) {
+    \\              return 1;
+    \\          } else {
+    \\              return fibonacci(x - 1) + fibonacci(x - 2);
+    \\          }
+    \\      }
+    \\  }
+    \\  fibonacci(35);
+;
 
 // const tessel_fibonacci_35 =
 //     \\  const fibonacci = fn(x) {
@@ -29,19 +29,19 @@ const repl = @import("repl/repl.zig");
 //     \\  fibonacci(35);
 // ;
 
-const tessel_fibonacci_35 =
-    \\     var left = 0;
-    \\     var right = 1;
-    \\     var temp = 0;
-    \\     var i = 1;
-    \\     while (i < 35) {
-    \\          temp = left + right;
-    \\          left = right;
-    \\          right = temp;
-    \\          i = i + 1;
-    \\     }
-    \\     right;
-;
+// const tessel_fibonacci_35 =
+//     \\     var left = 0;
+//     \\     var right = 1;
+//     \\     var temp = 0;
+//     \\     var i = 1;
+//     \\     while (i < 35) {
+//     \\          temp = left + right;
+//     \\          left = right;
+//     \\          right = temp;
+//     \\          i = i + 1;
+//     \\     }
+//     \\     right;
+// ;
 
 fn fibonacci(x: u32) u32 {
     if (x == 0) {
