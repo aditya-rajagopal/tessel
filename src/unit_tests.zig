@@ -8,4 +8,5 @@ comptime {
     _ = @import("tessel/vm.zig");
     _ = @import("tessel/compiler.zig");
     _ = @import("tessel/code.zig");
+    _ = @import("tessel/memory.zig");
 }

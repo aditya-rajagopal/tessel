@@ -1,65 +1,51 @@
 pub const VM = @This();
 
-// instructions: []const u8,
-// constants: std.MultiArrayList(ObjectPool.InternalObject).Slice,
+memory: Memory,
 allocator: Allocator,
 
-stack: std.MultiArrayList(ObjectPool.InternalObject),
-globals: []ObjectPool.InternalObject,
-stack_ptr: usize = 0,
+pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch };
+pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
-pub const VMError = error{ StackOverflow, AccessingEmptyStack, InsufficientOperandsOnStack, TypeMismatch };
-pub const Error = VMError || Allocator.Error;
+pub const memory_reservation = 65536;
 
-pub const stack_limit = 2048;
-pub const globals_size = 65536;
-
-pub fn init(allocator: Allocator) !VM {
-    var vm = VM{
-        // .instructions = byte_code.instructions,
-        // .constants = byte_code.constants,
+pub fn init(allocator: Allocator, reserve_memory: bool) !VM {
+    return VM{
+        .memory = try Memory.initCapacity(allocator, if (reserve_memory) memory_reservation else 0),
         .allocator = allocator,
-        .stack = .{},
-        .globals = try allocator.alloc(ObjectPool.InternalObject, globals_size),
     };
-    try vm.stack.ensureTotalCapacity(allocator, stack_limit);
-    return vm;
 }
 
 pub fn deinit(self: *VM) void {
-    // self.allocator.free(self.instructions);
-    // self.constants.deinit(self.allocator);
-    self.stack.deinit(self.allocator);
-    self.allocator.free(self.globals);
+    self.memory.deinit();
 }
 
-pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
-    var index: usize = @intCast(start_index);
-    while (index < byte_code.instructions.len) {
-        const op: Code.Opcode = @enumFromInt(byte_code.instructions[index]);
-        // std.debug.print("Index: {d} op:{s}\n", .{ index, @tagName(op) });
+pub fn run(self: *VM) !void {
+    // var self.memory.ins_ptr: usize = @intCast(start_index);
+    while (self.memory.ins_ptr < self.memory.instructions.items.len) {
+        const op: Code.Opcode = @enumFromInt(self.memory.instructions.items[self.memory.ins_ptr]);
+        // std.debug.print("Index: {d} op:{s}\n", .{ self.memory.ins_ptr, @tagName(op) });
 
         switch (op) {
             .load_const => {
-                const obj_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
-                index += 2;
-                try self.stack_push(byte_code.constants.get(obj_index));
+                const obj_index = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                self.memory.ins_ptr += 2;
+                try self.memory.stack_push(self.memory.get_constant(obj_index));
             },
             .ltrue => {
-                try self.stack_push(byte_code.constants.get(ObjectPool.true_object));
+                try self.memory.stack_push(self.memory.get(Memory.true_object));
             },
             .lfalse => {
-                try self.stack_push(byte_code.constants.get(ObjectPool.false_object));
+                try self.memory.stack_push(self.memory.get(Memory.false_object));
             },
             .lnull => {
-                try self.stack_push(byte_code.constants.get(ObjectPool.null_object));
+                try self.memory.stack_push(self.memory.get(Memory.null_object));
             },
             .pop => {
-                if (self.stack_ptr == 0) {
-                    index += 1;
+                if (self.memory.stack_ptr == 0) {
+                    self.memory.ins_ptr += 1;
                     continue;
                 }
-                _ = self.stack_pop();
+                _ = try self.memory.stack_pop();
             },
             .add,
             .sub,
@@ -68,14 +54,9 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
             .geq,
             .gt,
             => {
-                const right = self.stack_pop();
-                const right_tag = right.tag;
-                const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-                const left_tag = self.stack.items(.tag)[sptr - 1];
-                if (left_tag != right_tag) {
-                    return VMError.TypeMismatch;
-                }
-                switch (left_tag) {
+                const right = try self.memory.stack_pop();
+                const right_tag = right.dtype;
+                switch (right_tag) {
                     .integer => {
                         try self.eval_int_infix(op, right.data.integer);
                     },
@@ -86,36 +67,40 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
                 try self.eval_eq(op);
             },
             .neg => {
-                const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-                const left_tag = self.stack.items(.tag)[sptr - 1];
+                const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+                var memory_slice = self.memory.memory.slice();
+                const left_tag = memory_slice.items(.dtype)[sptr - 1];
                 if (left_tag != .integer) {
                     return VMError.TypeMismatch;
                 }
-                self.stack.items(.data)[sptr - 1].integer *= -1;
+                memory_slice.items(.data)[sptr - 1].integer *= -1;
             },
             .not => {
-                const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-                const left_tag = self.stack.items(.tag)[sptr - 1];
+                const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+                var memory_slice = self.memory.memory.slice();
+                const data_slice = memory_slice.items(.data);
+                const type_slice = memory_slice.items(.dtype);
+                const left_tag = type_slice[sptr - 1];
                 switch (left_tag) {
                     .integer => {
-                        const lhs = self.stack.items(.data)[sptr - 1].integer;
-                        self.stack.items(.tag)[sptr - 1] = .boolean;
-                        self.stack.items(.data)[sptr - 1].boolean = lhs == 0;
+                        const lhs = data_slice[sptr - 1].integer;
+                        type_slice[sptr - 1] = .boolean;
+                        data_slice[sptr - 1].boolean = lhs == 0;
                     },
                     .boolean => {
-                        self.stack.items(.data)[sptr - 1].boolean = !self.stack.items(.data)[sptr - 1].boolean;
+                        data_slice[sptr - 1].boolean = !data_slice[sptr - 1].boolean;
                     },
                     else => return VMError.TypeMismatch,
                 }
             },
             .jmp => {
-                const destination = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
-                index = destination;
+                const destination = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                self.memory.ins_ptr = destination;
                 continue;
             },
             .jn => {
-                const right = self.stack_pop();
-                const right_tag = right.tag;
+                const right = try self.memory.stack_pop();
+                const right_tag = right.dtype;
                 if (right_tag != .integer and right_tag != .boolean) {
                     return VMError.TypeMismatch;
                 }
@@ -127,82 +112,94 @@ pub fn run(self: *VM, byte_code: ByteCode, start_index: u32) !usize {
                 };
 
                 if (condition) {
-                    index += 5;
+                    self.memory.ins_ptr += 5;
                     continue;
                 } else {
-                    const destination = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
-                    index = destination;
+                    const destination = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                    self.memory.ins_ptr = destination;
                     continue;
                 }
             },
             .set_global => {
-                const var_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
-                index += 2;
+                const gid = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                self.memory.ins_ptr += 2;
 
-                const expr = self.stack_pop();
-                self.globals[var_index] = expr;
+                try self.memory.set_global(gid);
+                // const expr = self.memory.stack_pop();
+                // self.globals[var_self.memory.ins_ptr] = expr;
             },
             .get_global => {
-                const var_index = std.mem.bytesToValue(u16, byte_code.instructions[index + 1 ..]);
-                index += 2;
+                const gid = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                self.memory.ins_ptr += 2;
 
-                try self.stack_push(self.globals[var_index]);
+                try self.memory.get_global(gid);
             },
         }
-        index += 1;
+        self.memory.ins_ptr += 1;
     }
-    return index;
 }
 
 fn eval_int_infix(self: *VM, op: Code.Opcode, rhs: i64) !void {
-    const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+    const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+    const memory_slice = self.memory.memory.slice();
+    const dtype_slice = memory_slice.items(.dtype);
+    const data_slice = memory_slice.items(.data);
+    const left_tag = dtype_slice[sptr - 1];
+    if (left_tag != .integer) {
+        return VMError.TypeMismatch;
+    }
     switch (op) {
         .add => {
-            self.stack.items(.data)[sptr - 1].integer += rhs;
+            data_slice[sptr - 1].integer += rhs;
         },
         .sub => {
-            self.stack.items(.data)[sptr - 1].integer -= rhs;
+            data_slice[sptr - 1].integer -= rhs;
         },
         .mul => {
-            self.stack.items(.data)[sptr - 1].integer *= rhs;
+            data_slice[sptr - 1].integer *= rhs;
         },
         .div => {
-            const lhs = self.stack.items(.data)[sptr - 1].integer;
-            self.stack.items(.data)[sptr - 1].integer = @divFloor(lhs, rhs);
+            const lhs = data_slice[sptr - 1].integer;
+            data_slice[sptr - 1].integer = @divFloor(lhs, rhs);
         },
         .gt => {
-            const lhs = self.stack.items(.data)[sptr - 1].integer;
-            self.stack.items(.tag)[sptr - 1] = .boolean;
-            self.stack.items(.data)[sptr - 1].boolean = lhs > rhs;
+            const lhs = data_slice[sptr - 1].integer;
+            dtype_slice[sptr - 1] = .boolean;
+            data_slice[sptr - 1].boolean = lhs > rhs;
         },
         .geq => {
-            const lhs = self.stack.items(.data)[sptr - 1].integer;
-            self.stack.items(.tag)[sptr - 1] = .boolean;
-            self.stack.items(.data)[sptr - 1].boolean = lhs >= rhs;
+            const lhs = data_slice[sptr - 1].integer;
+            dtype_slice[sptr - 1] = .boolean;
+            data_slice[sptr - 1].boolean = lhs >= rhs;
         },
         else => unreachable,
     }
 }
 
 fn eval_eq(self: *VM, op: Code.Opcode) !void {
-    const right = self.stack_pop();
-    const right_tag = right.tag;
-    const sptr = self.stack_top() orelse return VMError.InsufficientOperandsOnStack;
-    const left_tag = self.stack.items(.tag)[sptr - 1];
+    const right = try self.memory.stack_pop();
+    const right_tag = right.dtype;
+    const sptr = self.memory.stack_top() orelse return VMError.InsufficientOperandsOnStack;
+
+    const memory_slice = self.memory.memory.slice();
+    const dtype_slice = memory_slice.items(.dtype);
+    const data_slice = memory_slice.items(.data);
+    const left_tag = dtype_slice[sptr - 1];
+
     if (left_tag == .integer and right_tag == .integer) {
-        const lhs = self.stack.items(.data)[sptr - 1].integer;
-        self.stack.items(.tag)[sptr - 1] = .boolean;
+        const lhs = data_slice[sptr - 1].integer;
+        dtype_slice[sptr - 1] = .boolean;
         switch (op) {
-            .eq => self.stack.items(.data)[sptr - 1].boolean = lhs == right.data.integer,
-            .neq => self.stack.items(.data)[sptr - 1].boolean = lhs != right.data.integer,
+            .eq => data_slice[sptr - 1].boolean = lhs == right.data.integer,
+            .neq => data_slice[sptr - 1].boolean = lhs != right.data.integer,
             else => unreachable,
         }
         return;
     }
 
     const left_bool = switch (left_tag) {
-        .integer => self.stack.items(.data)[sptr - 1].integer != 0,
-        .boolean => self.stack.items(.data)[sptr - 1].boolean,
+        .integer => data_slice[sptr - 1].integer != 0,
+        .boolean => data_slice[sptr - 1].boolean,
         else => {
             // const outstr = try std.fmt.allocPrint(
             //     allocator,
@@ -234,32 +231,12 @@ fn eval_eq(self: *VM, op: Code.Opcode) !void {
             return VMError.TypeMismatch;
         },
     };
-    self.stack.items(.tag)[sptr - 1] = .boolean;
+    dtype_slice[sptr - 1] = .boolean;
     switch (op) {
-        .eq => self.stack.items(.data)[sptr - 1].boolean = left_bool == right_bool,
-        .neq => self.stack.items(.data)[sptr - 1].boolean = left_bool != right_bool,
+        .eq => data_slice[sptr - 1].boolean = left_bool == right_bool,
+        .neq => data_slice[sptr - 1].boolean = left_bool != right_bool,
         else => unreachable,
     }
-}
-
-pub fn stack_pop(self: *VM) ObjectPool.InternalObject {
-    self.stack_ptr -= 1;
-    return self.stack.pop();
-}
-
-fn stack_push(self: *VM, obj: ObjectPool.InternalObject) VMError!void {
-    if (self.stack_ptr >= stack_limit) {
-        return Error.StackOverflow;
-    }
-    self.stack.appendAssumeCapacity(obj);
-    self.stack_ptr += 1;
-}
-
-pub fn stack_top(self: *VM) ?usize {
-    if (self.stack_ptr == 0) {
-        return null;
-    }
-    return self.stack_ptr;
 }
 
 test "vm_init" {
@@ -267,18 +244,17 @@ test "vm_init" {
 
     var symbol_table = SymbolTable.init();
     defer symbol_table.deinit(testing.allocator);
+    var vm = try VM.init(testing.allocator, true);
+    defer vm.deinit();
 
-    var compiler = try Compiler.init(testing.allocator, &symbol_table);
-    defer compiler.deinit();
+    var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
 
     var ast = try Parser.parse_program(source, testing.allocator, &symbol_table);
     defer ast.deinit(testing.allocator);
 
     try compiler.compile(&ast, 0);
-    // const byte_code: ByteCode = try compiler.get_byte_code();
-    var vm = try VM.init(testing.allocator);
-    vm.deinit();
-    // byte_code.deinit(testing.allocator);
+    // const self.memory: ByteCode = try compiler.get_self.memory();
+    // self.memory.deinit(testing.allocator);
 }
 
 const VMTestCase = struct {
@@ -434,22 +410,21 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
     for (tests) |t| {
         var symbol_table = SymbolTable.init();
         defer symbol_table.deinit(testing.allocator);
-        var compiler = try Compiler.init(testing.allocator, &symbol_table);
-        defer compiler.deinit();
+        var vm = try VM.init(testing.allocator, false);
+        defer vm.deinit();
+
         var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
+
+        var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
         try compiler.compile(&ast, 0);
-        const byte_code: ByteCode = try compiler.get_byte_code();
-        // defer byte_code.deinit(testing.allocator);
-        // var vm = try VM.init(byte_code, testing.allocator);
-        var vm = try VM.init(testing.allocator);
-        defer vm.deinit();
-        _ = try vm.run(byte_code, 0);
 
-        if (vm.stack_top()) |sptr| {
-            const object = vm.stack.get(sptr - 1);
+        try vm.run();
 
-            const outstr = try ObjectPool.ObjectToString(object, &buffer);
+        if (vm.memory.stack_top()) |sptr| {
+            const object = vm.memory.memory.get(sptr - 1);
+
+            const outstr = try Memory.ObjectToString(object, &buffer);
             try testing.expectEqualSlices(u8, t.expected, outstr);
         } else {
             try testing.expectEqualSlices(u8, t.expected, "null");
@@ -457,7 +432,6 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
     }
 }
 
-const ObjectPool = @import("object.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -466,7 +440,6 @@ const Ast = @import("ast.zig");
 const Code = @import("code.zig");
 const Parser = @import("parser.zig");
 const SymbolTable = @import("symbol_table.zig");
-const ObjectTypes = ObjectPool.ObjectTypes;
-const ObjectIndex = ObjectPool.ObjectIndex;
-const ByteCode = @import("byte_code.zig");
+// const ByteCode = @import("self.memory.zig");
 const Compiler = @import("compiler.zig");
+const Memory = @import("memory.zig");
