@@ -2,24 +2,36 @@ pub const Memory = @This();
 
 memory: std.MultiArrayList(MemoryObject),
 free_list: std.ArrayListUnmanaged(MemoryAddress),
-stack_frames: std.ArrayListUnmanaged(StackFrame),
 stack_ptr: u32,
-unused_frames: std.ArrayListUnmanaged(FrameIndex),
-allocator: Allocator,
 reserved_memory: u32,
+
+stack_frames: std.ArrayListUnmanaged(StackFrame),
+unused_frames: std.ArrayListUnmanaged(FrameIndex),
+
+instructions: std.ArrayList(u8),
+ins_ptr: u32,
+constants: std.ArrayListUnmanaged(MemoryAddress),
+globals: []MemoryAddress,
+
+allocator: Allocator,
+
+pub const ConstantID = u32;
+pub const GlobalID = u32;
 
 pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
 
-pub const StackSize = 4096;
+pub const stack_limit = 2048;
+pub const globals_limit = 65536;
+pub const instruction_init_size = 4096;
 
-pub const null_object: MemoryAddress = StackSize + 0;
-pub const true_object: MemoryAddress = StackSize + 1;
-pub const false_object: MemoryAddress = StackSize + 2;
-pub const break_object: MemoryAddress = StackSize + 3;
-pub const continue_object: MemoryAddress = StackSize + 4;
+pub const null_object: MemoryAddress = stack_limit + 0;
+pub const true_object: MemoryAddress = stack_limit + 1;
+pub const false_object: MemoryAddress = stack_limit + 2;
+pub const break_object: MemoryAddress = stack_limit + 3;
+pub const continue_object: MemoryAddress = stack_limit + 4;
 
-pub const reserved_objects: MemoryAddress = 5;
+pub const reserved_objects: MemoryAddress = stack_limit + 5;
 
 pub const BuiltInFn = *const fn (
     *Memory,
@@ -33,7 +45,7 @@ pub fn init(allocator: Allocator) Allocator.Error!Memory {
 }
 
 pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory {
-    const internal_capacity = capacity + reserved_objects;
+    const internal_capacity = capacity + reserved_objects - stack_limit;
     var pool = Memory{
         .memory = .{},
         .free_list = .{},
@@ -41,32 +53,39 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
         .unused_frames = .{},
         .stack_ptr = 0,
         .allocator = allocator,
+        .instructions = try std.ArrayList(u8).initCapacity(allocator, instruction_init_size),
+        .ins_ptr = 0,
+        .constants = .{},
+        .globals = try allocator.alloc(MemoryAddress, globals_limit),
         .reserved_memory = reserved_objects,
     };
     try pool.free_list.ensureUnusedCapacity(allocator, internal_capacity);
-    try pool.memory.ensureUnusedCapacity(allocator, StackSize + internal_capacity);
+    try pool.memory.ensureUnusedCapacity(allocator, stack_limit + internal_capacity);
 
     // Creating the stack
-    try pool.memory.resize(allocator, StackSize);
-    @memset(pool.memory.items(.tag), .stack);
-    @memset(pool.memory.items(.dtype), .null);
-    @memset(pool.memory.items(.refs), 0);
-    @memset(pool.memory.items(.data), MemoryObject.ObjectData{ .integer = 0 });
+    try pool.memory.resize(allocator, stack_limit + internal_capacity);
+    var memory_slice = pool.memory.slice();
+    const tag_slice = memory_slice.items(.tag);
+    @memset(tag_slice, .stack);
+    @memset(memory_slice.items(.dtype), .null);
+    @memset(memory_slice.items(.refs), 0);
+    @memset(memory_slice.items(.data), MemoryObject.ObjectData{ .integer = 0 });
+    @memset(pool.globals, stack_limit);
 
     for (0..internal_capacity) |i| {
-        try pool.free_list.append(allocator, @as(MemoryAddress, @intCast(StackSize + internal_capacity - 1 - i)));
-        try pool.memory.append(
-            allocator,
-            MemoryObject{
-                .tag = .heap,
-                .dtype = .null,
-                .data = .{ .integer = 0 },
-                .refs = 0,
-            },
-        );
+        const loc = @as(MemoryAddress, @intCast(stack_limit + internal_capacity - 1 - i));
+        pool.free_list.appendAssumeCapacity(loc);
+        tag_slice[loc] = .heap;
+        // pool.memory.appendAssumeCapacity(
+        //     MemoryObject{
+        //         .tag = .heap,
+        //         .dtype = .null,
+        //         .data = .{ .integer = 0 },
+        //         .refs = 0,
+        //     },
+        // );
     }
 
-    std.debug.print("FreeList: {d}\n", .{pool.free_list.items});
     // 0 will always be a null node and will be referenced when .null is needed
     const null_loc = pool.free_list.popOrNull() orelse unreachable;
     pool.memory.items(.tag)[null_loc] = .reserved;
@@ -94,13 +113,20 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
 }
 
 pub fn deinit(self: *Memory) void {
-    self.memory.deinit(self.allocator);
     self.stack_frames.deinit(self.allocator);
     self.unused_frames.deinit(self.allocator);
     self.free_list.deinit(self.allocator);
+    self.allocator.free(self.globals);
+    self.instructions.deinit();
+    self.constants.deinit(self.allocator);
+    for (0..self.memory.len) |i| {
+        self.destroy(@as(MemoryAddress, @intCast(i)));
+    }
+    self.memory.deinit(self.allocator);
 }
 
 pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress {
+    // var timer = std.time.Timer.start() catch unreachable;
     if (dtype == .null) {
         return null_object;
     }
@@ -134,6 +160,9 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
             return false_object;
         }
     }
+    // var end = timer.read();
+    // std.debug.print("Time to do checks: {s}\n", .{std.fmt.fmtDuration(end)});
+    // end = timer.read();
 
     var location: MemoryAddress = 0;
     if (self.free_list.items.len == 0) {
@@ -141,9 +170,25 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
     } else {
         location = self.free_list.popOrNull() orelse unreachable;
     }
+    // end = timer.read() - end;
+    // std.debug.print("Time to get location: {s}\n", .{std.fmt.fmtDuration(end)});
+    // end = timer.read();
 
-    var memory_data = self.memory.items(.data);
-    var memory_dtype = self.memory.items(.dtype);
+    try self.create(location, dtype, data);
+    // end = timer.read() - end;
+    // std.debug.print("Time to create variable: {s}\n", .{std.fmt.fmtDuration(end)});
+    // end = timer.read();
+
+    try self.free_list.ensureTotalCapacity(self.allocator, self.memory.len - stack_limit + 1);
+    // end = timer.read() - end;
+    // std.debug.print("Time ensure Total capacity: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("Time in alloc: {s}\n", .{std.fmt.fmtDuration(timer.read())});
+    return location;
+}
+
+pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const anyopaque) !void {
+    var memory_data: []MemoryObject.ObjectData = self.memory.items(.data);
+    var memory_dtype: []Types = self.memory.items(.dtype);
     switch (dtype) {
         .integer => {
             const value: *const i64 = @ptrCast(@alignCast(data));
@@ -171,8 +216,7 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
             const value: *const MemoryObject.StringType = @ptrCast(@alignCast(data));
             memory_dtype[location] = .string;
             memory_data[location].string_type = try self.allocator.create(std.ArrayListUnmanaged(u8));
-            memory_data[location].string_type.* = .{};
-            try memory_data[location].string_type.appendSlice(self.allocator, value.ptr[0..value.len]);
+            memory_data[location].string_type.* = std.ArrayListUnmanaged(u8).fromOwnedSlice(value.ptr[0..value.len]);
         },
         .array => {
             const value: *const MemoryObject.ArrayType = @ptrCast(@alignCast(data));
@@ -209,28 +253,35 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
         .continue_statement => unreachable,
     }
     self.memory.items(.refs)[location] = 0;
-    self.memory.items(.tag)[location] = .heap;
-    try self.free_list.ensureTotalCapacity(self.allocator, self.memory.len);
-    return location;
 }
 
 pub fn free(self: *Memory, ptr: MemoryAddress) void {
     std.debug.assert(ptr <= self.memory.len);
-    std.debug.assert(ptr >= StackSize);
-    if (ptr - StackSize < self.reserved_memory) {
+    // std.debug.assert(ptr >= stack_limit);
+    if (ptr < self.reserved_memory and ptr >= stack_limit) {
         return;
     }
-    if (self.memory.items(.refs)[ptr] == 0) {
-        self.free_possible_memory(ptr);
-        self.free_list.appendAssumeCapacity(ptr);
+    const memory_slice = self.memory.slice();
+    const refs = memory_slice.items(.refs);
+    const tag = memory_slice.items(.tag)[ptr];
+    if (tag == .constant) {
+        return;
+    }
+
+    if (refs[ptr] == 0) {
+        self.destroy(ptr);
+        if (tag != .stack) {
+            self.free_list.appendAssumeCapacity(ptr);
+        }
     } else {
-        self.memory.items(.refs)[ptr] -= 1;
+        refs[ptr] -= 1;
     }
 }
 
-fn free_possible_memory(self: *Memory, ptr: MemoryAddress) void {
-    const tag = self.memory.items(.dtype)[ptr];
-    var memory_data: []MemoryObject.ObjectData = self.memory.items(.data);
+fn destroy(self: *Memory, ptr: MemoryAddress) void {
+    const memory_slice = self.memory.slice();
+    const tag: Types = memory_slice.items(.dtype)[ptr];
+    var memory_data: []MemoryObject.ObjectData = memory_slice.items(.data);
     switch (tag) {
         .integer => {},
         .return_expression => {},
@@ -269,10 +320,92 @@ fn free_possible_memory(self: *Memory, ptr: MemoryAddress) void {
             arr_ptr.deinit(self.allocator);
             self.allocator.destroy(arr_ptr);
         },
-        .null, .boolean, .break_statement, .continue_statement, .builtin => unreachable,
+        .null, .boolean, .break_statement, .continue_statement, .builtin => return,
     }
-    self.memory.items(.dtype)[ptr] = .null;
-    self.memory.items(.data)[ptr].integer = 0;
+    memory_slice.items(.dtype)[ptr] = .null;
+    memory_slice.items(.data)[ptr].integer = 0;
+}
+
+pub fn register_constant(self: *Memory, dtype: Types, data: *const anyopaque) !ConstantID {
+    const ptr = try self.alloc(dtype, data);
+    try self.constants.append(self.allocator, ptr);
+    return @as(ConstantID, @intCast(self.constants.items.len - 1));
+}
+
+pub fn get_constant(self: *Memory, id: ConstantID) MemoryObject {
+    std.debug.assert(id < self.constants.items.len);
+    return self.memory.get(self.constants.items[id]);
+}
+
+// Give ownership of top of stack to global id
+pub fn set_global(self: *Memory, id: GlobalID) Error!void {
+    std.debug.assert(id < globals_limit);
+
+    var ptr = self.globals[id];
+    self.stack_ptr -= 1;
+
+    const data: MemoryObject = self.memory.get(self.stack_ptr);
+    var memory_slice = self.memory.slice();
+
+    if (ptr > reserved_objects) {
+        if (memory_slice.items(.tag)[ptr] != .constant) {
+            self.free(ptr);
+        }
+    }
+
+    switch (data.dtype) {
+        .boolean => {
+            self.globals[id] = if (data.data.boolean) true_object else false_object;
+            return;
+        },
+        .null => {
+            self.globals[id] = null_object;
+            return;
+        },
+        .continue_statement => {
+            self.globals[id] = continue_object;
+            return;
+        },
+        .break_statement => {
+            self.globals[id] = break_object;
+            return;
+        },
+        .builtin => unreachable,
+        else => {},
+    }
+
+    if (ptr < self.reserved_memory) {
+        const dummy: i64 = @intCast(id);
+        ptr = try self.alloc(.integer, @ptrCast(&dummy));
+    }
+
+    self.globals[id] = ptr;
+
+    memory_slice = self.memory.slice();
+    memory_slice.set(ptr, data);
+    memory_slice.items(.data)[self.stack_ptr].integer = 0;
+    memory_slice.items(.dtype)[self.stack_ptr] = .null;
+}
+
+pub fn get_global(self: *Memory, id: GlobalID) !void {
+    std.debug.assert(id < globals_limit);
+    const ptr = self.globals[id];
+    std.debug.assert(ptr != stack_limit);
+    try self.stack_push(self.get(ptr));
+}
+
+pub fn shrink_constants(self: *Memory, new_len: usize) void {
+    std.debug.assert(new_len <= self.constants.items.len);
+    for (new_len..self.constants.items.len) |i| {
+        self.free(@as(MemoryAddress, @intCast(i)));
+    }
+    self.constants.shrinkRetainingCapacity(new_len);
+}
+
+pub fn increase_ref(self: *Memory, ptr: MemoryAddress) void {
+    std.debug.assert(ptr < self.memory.len);
+    std.debug.assert(ptr >= reserved_objects);
+    self.memory.items(.refs)[ptr] += 1;
 }
 
 pub fn get_dtype(self: *Memory, ptr: MemoryAddress) Types {
@@ -301,10 +434,32 @@ pub fn get(self: *Memory, ptr: MemoryAddress) MemoryObject {
 }
 
 pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
-    if (self.stack_ptr >= StackSize) {
+    if (self.stack_ptr >= stack_limit) {
         return Error.StackOverflow;
     }
-    self.memory.set(self.stack_ptr, element);
+
+    var memory_slice = self.memory.slice();
+    if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
+        self.free(self.stack_ptr);
+    }
+
+    memory_slice.set(self.stack_ptr, element);
+    memory_slice.items(.tag)[self.stack_ptr] = .stack;
+    self.stack_ptr += 1;
+}
+
+pub fn stack_push_create(self: *Memory, dtype: Types, data: *const anyopaque) Error!void {
+    if (self.stack_ptr >= stack_limit) {
+        return Error.StackOverflow;
+    }
+    var memory_slice = self.memory.slice();
+    const stack_ptr_dtype = memory_slice.items(.dtype)[self.stack_ptr];
+    switch (stack_ptr_dtype) {
+        .string, .array, .hash_map => self.free(self.stack_ptr),
+        else => {},
+    }
+
+    try self.create(self.stack_ptr, dtype, data);
     self.stack_ptr += 1;
 }
 
@@ -313,9 +468,14 @@ pub fn stack_pop(self: *Memory) MemoryError!MemoryObject {
         return Error.PoppingEmptyStack;
     }
     self.stack_ptr -= 1;
-    const value = self.memory.get(self.stack_ptr);
-    self.memory.items(.dtype)[self.stack_ptr] = .null;
-    return value;
+    return self.memory.get(self.stack_ptr);
+}
+
+pub fn stack_top(self: *Memory) ?u32 {
+    if (self.stack_ptr == 0) {
+        return null;
+    }
+    return self.stack_ptr;
 }
 
 pub const MemoryAddress = u32;
@@ -417,6 +577,7 @@ pub const MemoryObject = struct {
         builtin,
         heap,
         stack,
+        constant,
     };
 };
 
@@ -435,72 +596,196 @@ pub const Types = enum(u8) {
     null,
 };
 
+pub fn ObjectToString(obj: MemoryObject, buffer: []u8) ![]const u8 {
+    switch (obj.dtype) {
+        .integer => return std.fmt.bufPrint(buffer, "{d}", .{obj.data.integer}),
+        .boolean => if (obj.data.boolean) {
+            return std.fmt.bufPrint(buffer, "true", .{});
+        } else {
+            return std.fmt.bufPrint(buffer, "false", .{});
+        },
+        .string => {
+            const data = obj.data.string_type;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
+        },
+        .runtime_error => {
+            const data = obj.data.runtime_error;
+            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .null => return std.fmt.bufPrint(buffer, "null", .{}),
+        .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        .builtin => unreachable,
+        .return_expression => unreachable,
+        .break_statement => return std.fmt.bufPrint(buffer, "break", .{}),
+        .continue_statement => return std.fmt.bufPrint(buffer, "continue", .{}),
+        else => return std.fmt.bufPrint(buffer, "null", .{}),
+    }
+}
+
 pub const StackFrame = extern struct {
     stack_start_ptr: u32,
     parent: FrameIndex,
 };
 
 test "Memory init" {
-    var timer = try std.time.Timer.start();
-    var memory = try Memory.init(testing.allocator);
-    const end = timer.read();
+    // var timer = try std.time.Timer.start();
+    var memory = try Memory.initCapacity(testing.allocator, 2048);
     defer memory.deinit();
-    std.debug.print("Time to init: {s}\n", .{std.fmt.fmtDuration(end)});
-    std.debug.print("\n", .{});
-    try testing.expect(memory.memory.items(.tag)[StackSize - 1] == .stack);
-    try testing.expect(memory.memory.items(.dtype)[StackSize] == .null);
-    try testing.expect(memory.memory.items(.dtype)[StackSize + 1] == .boolean);
-    try testing.expect(memory.memory.items(.dtype)[StackSize + 2] == .boolean);
-    try testing.expect(memory.memory.items(.dtype)[StackSize + 3] == .break_statement);
-    try testing.expect(memory.memory.items(.dtype)[StackSize + 4] == .continue_statement);
+    // const end = timer.read();
+    // std.debug.print("Time to test: {s}\n", .{std.fmt.fmtDuration(end)});
+    // end = timer.read();
+    // try testing.expectEqual(memory.memory.items(.tag)[stack_limit - 1], .stack);
+    try testing.expectEqual(memory.memory.items(.dtype)[stack_limit], .null);
+    try testing.expectEqual(memory.memory.items(.dtype)[stack_limit + 1], .boolean);
+    try testing.expectEqual(memory.memory.items(.dtype)[stack_limit + 2], .boolean);
+    try testing.expectEqual(memory.memory.items(.dtype)[stack_limit + 3], .break_statement);
+    try testing.expectEqual(memory.memory.items(.dtype)[stack_limit + 4], .continue_statement);
     try memory.stack_push(MemoryObject{
         .dtype = .integer,
         .data = .{ .integer = 15 },
         .refs = 0,
     });
-    try testing.expect(memory.stack_ptr == 1);
-    try testing.expect(memory.memory.items(.dtype)[0] == .integer);
-    try testing.expect(memory.memory.items(.data)[0].integer == 15);
-    const value = try memory.stack_pop();
+    // end = timer.read() - end;
+    // std.debug.print("Time to stackpush: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    try testing.expectEqual(memory.stack_ptr, 1);
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .integer);
+    try testing.expectEqual(memory.memory.items(.data)[0].integer, 15);
 
-    try testing.expect(value.dtype == .integer);
-    try testing.expect(value.data.integer == 15);
-    try testing.expect(memory.memory.items(.dtype)[0] == .null);
+    const value = try memory.stack_pop();
+    try testing.expectEqual(value.dtype, .integer);
+    try testing.expectEqual(value.data.integer, 15);
 
     const int_data: i64 = 10;
+    // end = timer.read();
+
     const int_ptr = try memory.alloc(.integer, @ptrCast(&int_data));
-    try testing.expect(memory.stack_ptr == 0);
+    // end = timer.read() - end;
+    try testing.expectEqual(memory.stack_ptr, 0);
     const int_ptr_data = memory.memory.get(int_ptr);
-    try testing.expect(int_ptr_data.tag == .heap);
-    try testing.expect(int_ptr_data.dtype == .integer);
-    try testing.expect(int_ptr_data.data.integer == int_data);
-    try testing.expect(int_ptr_data.refs == 0);
+    try testing.expectEqual(int_ptr_data.tag, .heap);
+    try testing.expectEqual(int_ptr_data.dtype, .integer);
+    try testing.expectEqual(int_ptr_data.data.integer, int_data);
+    try testing.expectEqual(int_ptr_data.refs, 0);
+    // std.debug.print("Time to create int: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
 
     const bool_data: bool = true;
     const bool_ptr = try memory.alloc(.boolean, @ptrCast(&bool_data));
     var bool_ptr_data = memory.memory.get(bool_ptr);
-    try testing.expect(bool_ptr == true_object);
-    try testing.expect(bool_ptr_data.tag == .reserved);
-    try testing.expect(bool_ptr_data.dtype == .boolean);
-    try testing.expect(bool_ptr_data.data.boolean == bool_data);
-    try testing.expect(bool_ptr_data.refs == 0);
+    try testing.expectEqual(bool_ptr, true_object);
+    try testing.expectEqual(bool_ptr_data.tag, .reserved);
+    try testing.expectEqual(bool_ptr_data.dtype, .boolean);
+    try testing.expectEqual(bool_ptr_data.data.boolean, bool_data);
+    try testing.expectEqual(bool_ptr_data.refs, 0);
 
+    // end = timer.read() - end;
+    // std.debug.print("Time to create bool: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
     const string_data = try std.fmt.allocPrint(testing.allocator, "This is a test string: {d}", .{int_data});
-    defer testing.allocator.free(string_data);
     const string_ptr = try memory.alloc(.string, @ptrCast(&string_data));
+    // end = timer.read() - end;
+    // std.debug.print("Time to create string: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
     const string_ptr_data = memory.memory.get(string_ptr);
 
-    try testing.expect(string_ptr_data.tag == .heap);
-    try testing.expect(string_ptr_data.dtype == .string);
-    try testing.expect(string_ptr_data.refs == 0);
-    memory.free(string_ptr);
+    try testing.expectEqual(string_ptr_data.tag, .heap);
+    try testing.expectEqual(string_ptr_data.dtype, .string);
+    try testing.expectEqual(string_ptr_data.refs, 0);
+
+    // freeing reserved object should not do anything
     memory.free(bool_ptr);
     bool_ptr_data = memory.memory.get(bool_ptr);
-    try testing.expect(bool_ptr == true_object);
-    try testing.expect(bool_ptr_data.tag == .reserved);
-    try testing.expect(bool_ptr_data.dtype == .boolean);
-    try testing.expect(bool_ptr_data.data.boolean == bool_data);
-    try testing.expect(bool_ptr_data.refs == 0);
+    // end = timer.read() - end;
+    // std.debug.print("Time to free bool: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+    try testing.expectEqual(bool_ptr, true_object);
+    try testing.expectEqual(bool_ptr_data.tag, .reserved);
+    try testing.expectEqual(bool_ptr_data.dtype, .boolean);
+    try testing.expectEqual(bool_ptr_data.data.boolean, bool_data);
+    try testing.expectEqual(bool_ptr_data.refs, 0);
+
+    // Push a string onto the stack and create a new object
+    const string_data2 = try std.fmt.allocPrint(testing.allocator, "This is a test string2: {d}", .{int_data});
+    try memory.stack_push_create(.string, @ptrCast(&string_data2));
+    // end = timer.read() - end;
+    // std.debug.print("Time to push on stack: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+    // The new stack variable should have string type and the data should be euqal
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .string);
+    try testing.expectEqualSlices(u8, string_data2, memory.memory.items(.data)[0].string_type.items);
+
+    const arraylist_ptr = memory.memory.items(.data)[0].string_type;
+
+    // pop the top of the stack and register that as a global variable. Invalidates the stack data
+    // But does nto copy the memory
+    try memory.set_global(0);
+    // end = timer.read() - end;
+    // std.debug.print("Time to set global: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+
+    // the 0th position in the stack should now be null and 0 value
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .null);
+    try testing.expectEqual(memory.memory.items(.data)[0].integer, 0);
+
+    // The global[0] should point to the first object after reserved object;
+    try testing.expectEqual(memory.globals[0], memory.reserved_memory + 2);
+    try testing.expectEqual(memory.memory.items(.dtype)[memory.globals[0]], .string);
+
+    // The pointer of the array list should be the same as the one on the stack before
+    try testing.expectEqual(memory.memory.items(.data)[memory.globals[0]].string_type, arraylist_ptr);
+    try testing.expectEqualSlices(u8, string_data2, memory.memory.items(.data)[memory.globals[0]].string_type.items);
+
+    // Push another string onto the stack
+    const string_data3 = try std.fmt.allocPrint(testing.allocator, "This is a test string: {d}", .{int_data});
+    try memory.stack_push_create(.string, @ptrCast(&string_data3));
+    // end = timer.read() - end;
+    // std.debug.print("Time to push on stack and create: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .string);
+    try testing.expectEqualSlices(u8, string_data, memory.memory.items(.data)[0].string_type.items);
+    // This is a different array list
+    try testing.expect(arraylist_ptr != memory.memory.items(.data)[0].string_type);
+
+    const arraylist_ptr2 = memory.memory.items(.data)[0].string_type;
+
+    // Pop this string off the stack
+    const string_stack_obj = try memory.stack_pop();
+    // end = timer.read() - end;
+    // std.debug.print("Time to pop off stack: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+    // The old top of the stack is still the same as pop does not nullify data
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .string);
+    try testing.expectEqualSlices(u8, string_data, memory.memory.items(.data)[0].string_type.items);
+
+    // The retrived string should be the same as the top of the stack
+    try testing.expectEqual(string_stack_obj.dtype, .string);
+    try testing.expectEqualSlices(u8, string_data, string_stack_obj.data.string_type.items);
+    // This should be the same as the new object
+    try testing.expectEqual(arraylist_ptr2, string_stack_obj.data.string_type);
+
+    // Push a new integer object onto the stack
+    // This should free the string memory unless we increased the reference by storing it somewhere else.
+
+    try memory.stack_push(int_ptr_data);
+    // end = timer.read() - end;
+    // std.debug.print("Time to push on stack with strin overwrite: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // end = timer.read();
+    try testing.expectEqual(memory.memory.items(.dtype)[0], .integer);
+    try testing.expectEqual(10, memory.memory.items(.data)[0].integer);
+    // end = timer.read();
+    // std.debug.print("Time to test: {s}\n", .{std.fmt.fmtDuration(end)});
+    // std.debug.print("\n", .{});
+    // std.debug.print("\n", .{});
 }
 
 const std = @import("std");

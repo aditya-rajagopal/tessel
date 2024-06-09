@@ -1,20 +1,20 @@
 const std = @import("std");
 const repl = @import("repl/repl.zig");
 
-const tessel_fibonacci_35 =
-    \\  const fibonacci = fn(x) {
-    \\      if ( x == 0 ) {
-    \\          return 0;
-    \\      } else {
-    \\          if ( x == 1 ) {
-    \\              return 1;
-    \\          } else {
-    \\              return fibonacci(x - 1) + fibonacci(x - 2);
-    \\          }
-    \\      }
-    \\  }
-    \\  fibonacci(35);
-;
+// const tessel_fibonacci_35 =
+//     \\  const fibonacci = fn(x) {
+//     \\      if ( x == 0 ) {
+//     \\          return 0;
+//     \\      } else {
+//     \\          if ( x == 1 ) {
+//     \\              return 1;
+//     \\          } else {
+//     \\              return fibonacci(x - 1) + fibonacci(x - 2);
+//     \\          }
+//     \\      }
+//     \\  }
+//     \\  fibonacci(35);
+// ;
 
 // const tessel_fibonacci_35 =
 //     \\  const fibonacci = fn(x) {
@@ -29,19 +29,20 @@ const tessel_fibonacci_35 =
 //     \\  fibonacci(35);
 // ;
 
-// const tessel_fibonacci_35 =
-//     \\     var left = 0;
-//     \\     var right = 1;
-//     \\     var temp = 0;
-//     \\     var i = 1;
-//     \\     while (i < 35) {
-//     \\          temp = left + right;
-//     \\          left = right;
-//     \\          right = temp;
-//     \\          i = i + 1;
-//     \\     }
-//     \\     right;
-// ;
+const tessel_fibonacci_35 =
+    \\     var left = 0;
+    \\     var right = 1;
+    \\     var temp = 0;
+    \\     var i = 1;
+    \\     while (i < 35) {
+    \\          temp = left + right;
+    \\          left = right;
+    \\          right = temp;
+    \\          i = i + 1;
+    \\     }
+    \\     right;
+;
+
 fn fibonacci(x: u32) u32 {
     if (x == 0) {
         return 0;
@@ -78,8 +79,9 @@ pub fn main() !void {
             {
                 var symbol_table = IdentifierMap.init();
                 defer symbol_table.deinit(allocator);
-                var compiler = try Compiler.init(allocator, &symbol_table);
-                defer compiler.deinit();
+                var vm = try VM.init(allocator, false);
+                defer vm.deinit();
+
                 var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &symbol_table);
                 defer ast.deinit(allocator);
 
@@ -87,17 +89,16 @@ pub fn main() !void {
                     try Parser.print_parser_errors_to_stderr(&ast);
                     return;
                 }
+
+                var compiler = try Compiler.create(allocator, &symbol_table, &vm.memory);
                 try compiler.compile(&ast, 0);
-                const byte_code: ByteCode = try compiler.get_byte_code();
 
-                var vm = try VM.init(allocator);
-                defer vm.deinit();
-                _ = try vm.run(byte_code, 0);
+                try vm.run();
 
-                if (vm.stack_top()) |sptr| {
-                    const obj = vm.stack.get(sptr - 1);
+                if (vm.memory.stack_top()) |sptr| {
+                    const obj = vm.memory.memory.get(sptr - 1);
 
-                    const outstr = try ObjectPool.ObjectToString(obj, &buffer);
+                    const outstr = try Memory.ObjectToString(obj, &buffer);
                     len = outstr.len;
                 }
             }
@@ -148,3 +149,4 @@ const global_env = @import("tessel/environment_pool.zig").global_env;
 const Compiler = @import("tessel/compiler.zig");
 const ByteCode = @import("tessel/byte_code.zig");
 const VM = @import("tessel/vm.zig");
+const Memory = @import("tessel/memory.zig");

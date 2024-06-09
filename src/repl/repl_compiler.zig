@@ -30,13 +30,11 @@ pub fn start() !void {
     var source_buffer = std.ArrayList(u8).init(allocator);
     defer source_buffer.deinit();
     try source_buffer.append(0);
-    var start_statement: u32 = 0;
+    // var start_statement: u32 = 0;
 
     var identifier_map = IdentifierMap.init();
     defer identifier_map.deinit(allocator);
-    var compiler = try Compiler.init(allocator, &identifier_map);
-    defer compiler.deinit();
-    var vm = try VM.init(allocator);
+    var vm = try VM.init(allocator, true);
     defer vm.deinit();
 
     while (true) {
@@ -73,24 +71,25 @@ pub fn start() !void {
                 continue;
             }
 
-            try compiler.compile(&ast, 0);
-            const byte_code = try compiler.get_byte_code();
+            var compiler = try Compiler.create(allocator, &identifier_map, &vm.memory);
 
-            const out = try Code.code_to_str(allocator, byte_code.instructions);
+            try compiler.compile(&ast, 0);
+
+            const out = try Code.code_to_str(allocator, vm.memory.instructions.items);
             defer allocator.free(out);
+
             try stdout.print("{s}\n", .{out});
             try bw.flush();
 
-            start_statement = @intCast(try vm.run(byte_code, start_statement));
+            try vm.run();
 
-            try stdout.print("{d}\n", .{byte_code.instructions});
-            _ = vm.stack_top() orelse {
-                // try stdout.print("Error running code. Stack empty", .{});
+            try stdout.print("{d}\n", .{vm.memory.instructions.items});
+            _ = vm.memory.stack_top() orelse {
                 try bw.flush();
                 continue;
             };
 
-            const outstr = try object.ObjectToString(vm.stack_pop(), &buffer);
+            const outstr = try Memory.ObjectToString(try vm.memory.stack_pop(), &buffer);
             try stdout.print("Output >> {s}\n", .{outstr});
             try bw.flush();
         }
@@ -110,10 +109,10 @@ const Allocator = std.mem.Allocator;
 const lexer = @import("../tessel/lexer.zig");
 const Parser = @import("../tessel/parser.zig");
 const Evaluator = @import("../tessel/evaluator.zig");
-const object = @import("../tessel/object.zig");
 const Environment = @import("../tessel/environment.zig");
 const IdentifierMap = @import("../tessel/symbol_table.zig");
 const global_env = @import("../tessel/environment_pool.zig").global_env;
 const Compiler = @import("../tessel/compiler.zig");
 const Code = @import("../tessel/code.zig");
 const VM = @import("../tessel/vm.zig");
+const Memory = @import("../tessel/memory.zig");
