@@ -24,13 +24,6 @@ pub fn create(allocator: Allocator, map: *SymbolTable, memory: *Memory) !Compile
     return comp;
 }
 
-// pub fn get_byte_code(self: *Compiler) !ByteCode {
-//     return ByteCode{
-//         .instructions = self.memory.instructions.items,
-//         .constants = self.memory.constants.slice(),
-//     };
-// }
-
 pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
     const root_node = ast.nodes.get(0);
     const statements = ast.extra_data[root_node.node_data.lhs..root_node.node_data.rhs];
