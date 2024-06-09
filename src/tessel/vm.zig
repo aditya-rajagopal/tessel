@@ -158,11 +158,19 @@ fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: Memory.MemoryObject) !void
         },
         .eq => {
             const result = std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
-            try self.memory.stack_push_create(.boolean, @ptrCast(&result));
+            if (result) {
+                try self.memory.stack_push(self.memory.get(Memory.true_object));
+            } else {
+                try self.memory.stack_push(self.memory.get(Memory.false_object));
+            }
         },
         .neq => {
             const result = !std.mem.eql(u8, lhs.data.string_type.items, rhs.data.string_type.items);
-            try self.memory.stack_push_create(.boolean, @ptrCast(&result));
+            if (result) {
+                try self.memory.stack_push(self.memory.get(Memory.true_object));
+            } else {
+                try self.memory.stack_push(self.memory.get(Memory.false_object));
+            }
         },
         else => {
             return VMError.TypeMismatch;
@@ -365,6 +373,10 @@ test "evaluate_string_expressions" {
         .{ .source = "const a = \"foobar\"; a;", .expected = "foobar" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + b;", .expected = "foobar" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .expected = "foobar" },
+        .{ .source = "const a = \"foo\"; a == \"foo\";", .expected = "true" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a == b;", .expected = "false" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a != b;", .expected = "true" },
+        .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b == \"foobar\";", .expected = "true" },
         // .{
         //     .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
         //     .expected = "foobaz barbaz",
