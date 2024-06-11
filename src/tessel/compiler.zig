@@ -33,17 +33,23 @@ pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
 
 fn compile_program_statements(self: *Compiler, ast: *const Ast, statements: []u32) !void {
     for (statements, 0..) |s, i| {
-        try self.compile_statement(ast, s, statements.len - 1 - i == 0);
+        try self.compile_statement(ast, s, statements.len - 1 - i == 0, true);
     }
 }
 
-fn compile_block_statements(self: *Compiler, ast: *const Ast, statements: []u32) !void {
+fn compile_block_statements(self: *Compiler, ast: *const Ast, statements: []u32, pop_last: bool) !void {
     for (statements, 0..) |s, i| {
-        try self.compile_statement(ast, s, statements.len - 1 - i == 0);
+        try self.compile_statement(ast, s, statements.len - 1 - i == 0, pop_last);
     }
 }
 
-fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex, is_last: bool) !void {
+fn compile_statement(
+    self: *Compiler,
+    ast: *const Ast,
+    node: Ast.Node.NodeIndex,
+    is_last: bool,
+    pop_last: bool,
+) !void {
     if (node >= ast.nodes.len) {
         return Error.IllegalAstNodeReference;
     }
@@ -56,7 +62,10 @@ fn compile_statement(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex,
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
             if (is_last) {
-                return self.eval_expression(ast, ast_node.node_data.lhs);
+                try self.eval_expression(ast, ast_node.node_data.lhs);
+                if (pop_last) {
+                    try self.emit(.pop, &[_]u32{});
+                }
             } else {
                 const start = self.memory.instructions.items.len;
                 const obj_start = self.memory.constants.items.len;
@@ -114,11 +123,13 @@ fn eval_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void 
     std.debug.assert(block_node_tag == .BLOCK);
     const block_node_data = ast.nodes.items(.node_data)[node.node_data.rhs];
     const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-    try self.compile_block_statements(ast, statements);
+    try self.compile_block_statements(ast, statements, false);
 
     try self.emit(.jmp, &[_]u32{eval_start});
 
     self.overwrite_jmp_pos(jn_pos, self.memory.instructions.items.len);
+    try self.emit(.lnull, &[_]u32{});
+    try self.emit(.pop, &[_]u32{});
 }
 
 fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) Error!void {
@@ -147,6 +158,27 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
             );
             const obj = try self.memory.register_constant(.string, @ptrCast(&output));
             try self.emit(.load_const, &[_]u32{obj});
+        },
+        .ARRAY_LITERAL => {
+            try self.emit_array_literal(ast, ast_node);
+        },
+        // <lbracket><integer><colon><integer><rbracket>
+        // main_token = :
+        // lhs = expression/identifier/literal that returns an array or strign
+        // rhs = position into extra data for the 2 expressions that evaluate to the start and end of the range.
+        .INDEX_RANGE => {
+            // the array or string
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            // the left and right ranges
+            const loc = ast_node.node_data.rhs;
+            try self.eval_expression(ast, ast.extra_data[loc]);
+            try self.eval_expression(ast, ast.extra_data[loc + 1]);
+            try self.emit(.index_range, &[_]u32{});
+        },
+        .INDEX_INTO => {
+            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.emit(.index_into, &[_]u32{});
         },
         .IDENTIFIER => {
             try self.emit(.get_global, &[_]u32{ast_node.node_data.lhs});
@@ -201,6 +233,20 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
     }
 }
 
+fn emit_array_literal(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
+    const expression_start = ast_node.node_data.lhs;
+    const expression_end = ast_node.node_data.rhs;
+    if (expression_end == 0) {
+        try self.emit(.array, &[_]u32{0});
+    }
+
+    const expressions = ast.extra_data[expression_start..expression_end];
+    for (0..expressions.len) |i| {
+        try self.eval_expression(ast, expressions[expressions.len - 1 - i]);
+    }
+    try self.emit(.array, &[_]u32{@as(u32, @intCast(expressions.len))});
+}
+
 fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
     // Emit condition evaluation
     try self.eval_expression(ast, ast_node.node_data.lhs);
@@ -214,7 +260,7 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, statements);
+            try self.compile_block_statements(ast, statements, false);
 
             const jmp_pos = self.memory.instructions.items.len;
             try self.emit(.jmp, &[_]u32{9090});
@@ -232,7 +278,7 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[0]];
             const statements_if = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, statements_if);
+            try self.compile_block_statements(ast, statements_if, false);
 
             const jmp_pos = self.memory.instructions.items.len;
             try self.emit(.jmp, &[_]u32{9090});
@@ -243,7 +289,7 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             const statements_else = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, statements_else);
+            try self.compile_block_statements(ast, statements_else, false);
 
             self.overwrite_jmp_pos(jmp_pos, self.memory.instructions.items.len);
         },
@@ -303,7 +349,7 @@ test "test_arithmatic_compile" {
     const tests = [_]CompilerTest{
         .{
             .source = "1 + 2; 1 + 2",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 1 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -316,19 +362,19 @@ test "test_arithmatic_compile" {
 
         .{
             .source = "true",
-            .expected_instructions = &[_]u8{11},
+            .expected_instructions = &[_]u8{ 11, 18 },
             .expected_constant_tags = &[_]MemoryTypes{},
             .expected_data = &[_]Memory.MemoryObject.ObjectData{},
         },
         .{
             .source = "false",
-            .expected_instructions = &[_]u8{12},
+            .expected_instructions = &[_]u8{ 12, 18 },
             .expected_constant_tags = &[_]MemoryTypes{},
             .expected_data = &[_]Memory.MemoryObject.ObjectData{},
         },
         .{
             .source = "1 - 2",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 2 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 2, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -340,13 +386,13 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "true == true",
-            .expected_instructions = &[_]u8{ 11, 11, 9 },
+            .expected_instructions = &[_]u8{ 11, 11, 9, 18 },
             .expected_constant_tags = &[_]MemoryTypes{},
             .expected_data = &[_]Memory.MemoryObject.ObjectData{},
         },
         .{
             .source = "1 * 2",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 3 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 3, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -358,7 +404,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "1 < 2",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -370,7 +416,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "!!-5",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 5, 8, 8 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 5, 8, 8, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
             },
@@ -380,7 +426,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "if (1 < 2) { 10; } else { 50; 60;}",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7, 14, 20, 0, 0, 0, 0, 2, 0, 13, 23, 0, 0, 0, 0, 3, 0 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7, 14, 20, 0, 0, 0, 0, 2, 0, 13, 23, 0, 0, 0, 0, 3, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -396,7 +442,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "if (true) { 10; }",
-            .expected_instructions = &[_]u8{ 11, 14, 14, 0, 0, 0, 0, 0, 0, 13, 15, 0, 0, 0, 15 },
+            .expected_instructions = &[_]u8{ 11, 14, 14, 0, 0, 0, 0, 0, 0, 13, 15, 0, 0, 0, 15, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
             },
@@ -418,7 +464,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "var i = 0; while (i < 5) { i = i + 1}",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 16, 0, 0, 0, 1, 0, 17, 0, 0, 7, 14, 33, 0, 0, 0, 17, 0, 0, 0, 2, 0, 1, 16, 0, 0, 13, 6, 0, 0, 0 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 16, 0, 0, 0, 1, 0, 17, 0, 0, 7, 14, 33, 0, 0, 0, 17, 0, 0, 0, 2, 0, 1, 16, 0, 0, 13, 6, 0, 0, 0, 15, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -446,6 +492,10 @@ fn test_compiler(tests: []const CompilerTest) !void {
         var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
         try compiler.compile(&ast, 0);
+        const out = try Code.code_to_str(testing.allocator, memory.instructions.items);
+        defer testing.allocator.free(out);
+        // std.debug.print("Ins: {any}\n", .{memory.instructions.items});
+        // std.debug.print("Instructions:\n{s}\n", .{out});
         // var byte_code: ByteCode = try compiler.get_byte_code();
         try testing.expectEqual(t.expected_instructions.len, memory.instructions.items.len);
         try testing.expectEqual(t.expected_data.len, memory.constants.items.len);

@@ -217,8 +217,7 @@ pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const
             memory_data[location].array = try self.allocator.create(
                 std.ArrayListUnmanaged(MemoryAddress),
             );
-            memory_data[location].array.* = .{};
-            try memory_data[location].array.appendSlice(self.allocator, value.data);
+            memory_data[location].array.* = std.ArrayListUnmanaged(MemoryAddress).fromOwnedSlice(@constCast(value.data));
         },
         .hash_map => {
             const value: *const u32 = @ptrCast(@alignCast(data));
@@ -252,12 +251,26 @@ pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
     const data = self.get(addr);
 
     switch (data.dtype) {
-        .string => {
-            var output = try data.data.string_type.clone(self.allocator);
-            const obj = try self.alloc(.string, @ptrCast(&output.toOwnedSlice(self.allocator)));
+        .integer => {
+            const obj = try self.alloc(.integer, @ptrCast(&data.data.integer));
             return obj;
         },
-        inline else => return addr,
+        .string => {
+            var output = try data.data.string_type.clone(self.allocator);
+            const obj = try self.alloc(.string, @ptrCast(&(try output.toOwnedSlice(self.allocator))));
+            return obj;
+        },
+        .array => {
+            var new_objects = try std.ArrayList(MemoryAddress).initCapacity(self.allocator, data.data.array.items.len);
+            for (0..data.data.array.items.len) |i| {
+                new_objects.appendAssumeCapacity(try self.dupe(data.data.array.items[i]));
+            }
+            const obj = try self.alloc(.array, @ptrCast(&(try new_objects.toOwnedSlice())));
+            return obj;
+        },
+        .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => return addr,
+        .runtime_error => unreachable,
+        .hash_map => unreachable,
     }
 }
 
@@ -321,7 +334,7 @@ fn destroy(self: *Memory, ptr: MemoryAddress) void {
         .array => {
             const arr_ptr = memory_data[ptr].array;
             for (arr_ptr.items) |pos| {
-                self.free(pos);
+                self.destroy(pos);
             }
             arr_ptr.deinit(self.allocator);
             self.allocator.destroy(arr_ptr);
@@ -356,9 +369,13 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
     var memory_slice = self.memory.slice();
 
     if (ptr > reserved_objects) {
-        // if (memory_slice.items(.tag)[ptr] != .constant) {
-        self.free(ptr);
-        // }
+        if (memory_slice.items(.tag)[ptr] != .constant) {
+            // switch (memory_slice.items(.dtype)[ptr]) {
+            //     .string, .array => self.destroy(ptr),
+            //     else => {},
+            // }
+            self.destroy(ptr);
+        }
     }
 
     switch (data.dtype) {
@@ -384,6 +401,12 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
 
     if (data.tag == .constant) {
         ptr = try self.dupe(self.stack_ptr);
+        if (ptr > self.reserved_memory) {
+            self.globals[id] = ptr;
+            memory_slice.items(.data)[self.stack_ptr].integer = 0;
+            memory_slice.items(.dtype)[self.stack_ptr] = .null;
+            return;
+        }
     }
 
     if (ptr < self.reserved_memory) {
@@ -392,13 +415,66 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
         self.globals[id] = ptr;
         memory_slice = self.memory.slice();
         memory_slice.set(ptr, data);
-    } else {
-        self.globals[id] = ptr;
+        memory_slice.items(.tag)[ptr] = .heap;
     }
 
     memory_slice = self.memory.slice();
+    memory_slice.set(ptr, data);
+    memory_slice.items(.tag)[ptr] = .heap;
     memory_slice.items(.data)[self.stack_ptr].integer = 0;
     memory_slice.items(.dtype)[self.stack_ptr] = .null;
+}
+
+pub fn move_stack_top_to_heap(self: *Memory) !MemoryAddress {
+    // TODO: This is very similar to the global_set see if this can be merged
+    self.stack_ptr -= 1;
+    const data: MemoryObject = self.memory.get(self.stack_ptr);
+
+    var heap_addr: MemoryAddress = 0;
+
+    switch (data.dtype) {
+        .boolean => {
+            return if (data.data.boolean) true_object else false_object;
+        },
+        .null => {
+            return null_object;
+        },
+        .continue_statement => {
+            return continue_object;
+        },
+        .break_statement => {
+            return break_object;
+        },
+        .builtin => unreachable,
+        else => {},
+    }
+
+    if (data.tag == .constant) {
+        heap_addr = try self.dupe(self.stack_ptr);
+        if (heap_addr > self.reserved_memory) {
+            var memory_slice = self.memory.slice();
+            memory_slice.items(.data)[self.stack_ptr].integer = 0;
+            memory_slice.items(.dtype)[self.stack_ptr] = .null;
+            memory_slice.items(.tag)[self.stack_ptr] = .stack;
+            return heap_addr;
+        }
+    }
+
+    if (heap_addr < self.reserved_memory) {
+        const dummy: i64 = @intCast(0);
+        heap_addr = try self.alloc(.integer, @ptrCast(&dummy));
+        var memory_slice = self.memory.slice();
+        memory_slice.set(heap_addr, data);
+    }
+
+    var memory_slice = self.memory.slice();
+    memory_slice.set(heap_addr, data);
+
+    memory_slice.items(.tag)[heap_addr] = .heap;
+    memory_slice.items(.data)[self.stack_ptr].integer = 0;
+    memory_slice.items(.dtype)[self.stack_ptr] = .null;
+    memory_slice.items(.tag)[self.stack_ptr] = .stack;
+    return heap_addr;
 }
 
 pub fn get_global(self: *Memory, id: GlobalID) !void {
@@ -615,7 +691,7 @@ pub const Types = enum(u8) {
     null,
 };
 
-pub fn ObjectToString(obj: MemoryObject, buffer: []u8) ![]const u8 {
+pub fn ObjectToString(self: *Memory, obj: MemoryObject, buffer: []u8) ![]const u8 {
     switch (obj.dtype) {
         .integer => return std.fmt.bufPrint(buffer, "{d}", .{obj.data.integer}),
         .boolean => if (obj.data.boolean) {
@@ -630,6 +706,22 @@ pub fn ObjectToString(obj: MemoryObject, buffer: []u8) ![]const u8 {
         .runtime_error => {
             const data = obj.data.runtime_error;
             return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+        },
+        .array => {
+            var local_buffer: [4096]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&local_buffer);
+            const allocator = fba.allocator();
+            var local_array = std.ArrayList(u8).init(allocator);
+            defer local_array.deinit();
+
+            try local_array.appendSlice("[");
+            for (obj.data.array.items) |pos| {
+                const data = self.get(pos);
+                try local_array.appendSlice(try self.ObjectToString(data, buffer));
+                try local_array.appendSlice(", ");
+            }
+            try local_array.appendSlice("]");
+            return std.fmt.bufPrint(buffer, "{s}", .{local_array.items});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),

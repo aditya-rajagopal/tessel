@@ -608,7 +608,7 @@ fn eval_index_range(
     } else {
         right = @as(usize, @intCast(len + r_index_value));
     }
-    if (r_index_value > l_index) {
+    if (left > right) {
         const output = try std.fmt.allocPrint(
             allocator,
             "Left index must be lower than right index. Got left: {d} right: {d}",

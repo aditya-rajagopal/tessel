@@ -95,12 +95,11 @@ pub fn main() !void {
 
                 try vm.run();
 
-                if (vm.memory.stack_top()) |sptr| {
-                    const obj = vm.memory.memory.get(sptr - 1);
+                const sptr = vm.memory.stack_top() orelse 0;
+                const obj = vm.memory.memory.get(sptr);
 
-                    const outstr = try Memory.ObjectToString(obj, &buffer);
-                    len = outstr.len;
-                }
+                const outstr = try vm.memory.ObjectToString(obj, &buffer);
+                len = outstr.len;
             }
             const end_time = timer.read();
             std.debug.print("Fibonacci in Tessel: result: {s} time: {d}\n", .{ buffer[0..len], std.fmt.fmtDuration(end_time) });

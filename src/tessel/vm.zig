@@ -3,7 +3,7 @@ pub const VM = @This();
 memory: Memory,
 allocator: Allocator,
 
-pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch };
+pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch, IndexOutOfBounds };
 pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
 pub const memory_reservation = 65536;
@@ -40,6 +40,18 @@ pub fn run(self: *VM) !void {
             .lnull => {
                 try self.memory.stack_push(self.memory.get(Memory.null_object));
             },
+            .array => {
+                const num_objects = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
+                self.memory.ins_ptr += 2;
+                var data = try std.ArrayList(Memory.MemoryAddress).initCapacity(self.allocator, num_objects);
+                defer data.deinit();
+                for (0..num_objects) |_| {
+                    data.appendAssumeCapacity(try self.memory.move_stack_top_to_heap());
+                }
+                try self.memory.stack_push_create(.array, @ptrCast(&(try data.toOwnedSlice())));
+            },
+            .index_into => try self.eval_index_into(),
+            .index_range => try self.eval_index_range(),
             .pop => {
                 if (self.memory.stack_ptr == 0) {
                     self.memory.ins_ptr += 1;
@@ -59,7 +71,9 @@ pub fn run(self: *VM) !void {
                 switch (right_tag) {
                     .integer => try self.eval_int_infix(op, right.data.integer),
                     .string => try self.eval_string_infix(op, right),
-                    else => return VMError.TypeMismatch,
+                    else => {
+                        return VMError.TypeMismatch;
+                    },
                 }
             },
             .neq, .eq => {
@@ -135,6 +149,109 @@ pub fn run(self: *VM) !void {
             },
         }
         self.memory.ins_ptr += 1;
+    }
+}
+
+fn eval_index_range(self: *VM) !void {
+    const right_range = try self.memory.stack_pop();
+    if (right_range.dtype != .integer) {
+        return Error.TypeMismatch;
+    }
+    const left_range = try self.memory.stack_pop();
+    if (left_range.dtype != .integer) {
+        return Error.TypeMismatch;
+    }
+    const literal = try self.memory.stack_pop();
+    // var memory_slice = self.memory.memory.slice();
+    const len = switch (literal.dtype) {
+        .array => @as(i64, @intCast(literal.data.array.items.len)),
+        .string => @as(i64, @intCast(literal.data.string_type.items.len)),
+        else => unreachable,
+    };
+
+    const left_index = left_range.data.integer;
+    const right_index = right_range.data.integer;
+    if (left_index >= len or left_index < -(len - 1)) {
+        return Error.IndexOutOfBounds;
+    }
+
+    if (right_index > len or right_index < -(len - 1)) {
+        return Error.IndexOutOfBounds;
+    }
+
+    var left: usize = undefined;
+    var right: usize = undefined;
+    if (left_index >= 0) {
+        left = @as(usize, @intCast(left_index));
+    } else {
+        left = @as(usize, @intCast(len + left_index));
+    }
+    if (right_index >= 0) {
+        right = @as(usize, @intCast(right_index));
+    } else {
+        right = @as(usize, @intCast(len + right_index));
+    }
+
+    if (left > right) {
+        return Error.IndexOutOfBounds;
+    }
+
+    switch (literal.dtype) {
+        .array => {
+            const locations = literal.data.array.items[left..right];
+            var new_locations = try std.ArrayList(u32).initCapacity(self.allocator, locations.len);
+            for (0..locations.len) |i| {
+                new_locations.appendAssumeCapacity(try self.memory.dupe(locations[i]));
+            }
+            try self.memory.stack_push_create(.array, @ptrCast(&(try new_locations.toOwnedSlice())));
+        },
+        .string => {
+            const slice = literal.data.string_type.items[left..right];
+            const str = try std.fmt.allocPrint(self.allocator, "{s}", .{slice});
+            try self.memory.stack_push_create(.string, @ptrCast(&str));
+        },
+        else => return Error.TypeMismatch,
+    }
+}
+
+fn eval_index_into(self: *VM) !void {
+    const index = try self.memory.stack_pop();
+    if (index.dtype != .integer) {
+        return Error.TypeMismatch;
+    }
+    const literal = try self.memory.stack_pop();
+
+    const len = switch (literal.dtype) {
+        .array => @as(i64, @intCast(literal.data.array.items.len)),
+        .string => @as(i64, @intCast(literal.data.string_type.items.len)),
+        else => unreachable,
+    };
+
+    const value = index.data.integer;
+
+    if (value >= len or value < -(len - 1)) {
+        return Error.IndexOutOfBounds;
+    }
+
+    var i: usize = undefined;
+    if (value >= 0) {
+        i = @as(usize, @intCast(value));
+    } else {
+        i = @as(usize, @intCast(len + value));
+    }
+
+    switch (literal.dtype) {
+        .array => {
+            var location = literal.data.array.items[i];
+            location = try self.memory.dupe(location);
+            try self.memory.stack_push(self.memory.get(location));
+        },
+        .string => {
+            const character = literal.data.string_type.items[i];
+            const str = try std.fmt.allocPrint(self.allocator, "{c}", .{character});
+            try self.memory.stack_push_create(.string, @ptrCast(&str));
+        },
+        else => return Error.TypeMismatch,
     }
 }
 
@@ -377,6 +494,12 @@ test "evaluate_string_expressions" {
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a == b;", .expected = "false" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a != b;", .expected = "true" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b == \"foobar\";", .expected = "true" },
+        .{ .source = "const a = \"foobar\"; a[0];", .expected = "f" },
+        .{ .source = "const a = \"foobar\"; a[0] + a[-1];", .expected = "fr" },
+        .{ .source = "const a = \"foobar\"; a[0:2];", .expected = "fo" },
+        // .{ .source = "const a = \"foobar\"; a[0:2][0];", .expected = "f" },
+        .{ .source = "const a = \"foobar\"; a[0:3] + a[3:6];", .expected = "foobar" },
+
         // .{
         //     .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
         //     .expected = "foobaz barbaz",
@@ -456,6 +579,26 @@ test "run_prefix_not" {
     try run_vm_tests(&tests);
 }
 
+test "run_arrays" {
+    const tests = [_]VMTestCase{
+        .{ .source = "[1, 2, 3]", .expected = "[1, 2, 3, ]" },
+        .{ .source = "const a = 20; [1, 2, a]", .expected = "[1, 2, 20, ]" },
+        .{ .source = "[1, 2, 3][0]", .expected = "1" },
+        .{ .source = "[1, \"two\", 3][1]", .expected = "two" },
+        .{ .source = "const a = [1, 2, 3]; a;", .expected = "[1, 2, 3, ]" },
+        .{ .source = "const a = [1, \"two\", 3]; a;", .expected = "[1, two, 3, ]" },
+        .{ .source = "const a = [1, [1, 2], 3]; a[1];", .expected = "[1, 2, ]" },
+        // .{ .source = "const a = [1, [1, 2], 3]; a[1][0];", .expected = "1" },
+        .{ .source = "const a = [1, 2, 3]; a[-1];", .expected = "3" },
+        .{ .source = "const a = [1, 2, 3]; a[0:1];", .expected = "[1, ]" },
+        .{ .source = "const a = [1, 2, 3]; a[0:2];", .expected = "[1, 2, ]" },
+        .{ .source = "const a = [1, [1, 2], 3]; a[0:2];", .expected = "[1, [1, 2, ], ]" },
+        // .{ .source = "const last = fn(x) { return x[-1] }; last([1, 2, 3]);", .expected = "3" },
+    };
+
+    try run_vm_tests(&tests);
+}
+
 test "evaluate_identifiers" {
     const tests = [_]VMTestCase{
         .{ .source = "const a = 10; a;", .expected = "10" },
@@ -500,15 +643,13 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
         // std.debug.print("Instructions:\n{s}\n", .{out});
         try vm.run();
 
-        if (vm.memory.stack_top()) |_| {
-            const object = try vm.memory.stack_pop();
+        const sptr = vm.memory.stack_top() orelse 0;
+        // std.debug.print("SPTR: {d}\n", .{sptr});
+        const object = vm.memory.memory.get(sptr);
+        // std.debug.print("OBJECT: {any}\n", .{object});
 
-            const outstr = try Memory.ObjectToString(object, &buffer);
-            // std.debug.print("Output: {s}\n", .{outstr});
-            try testing.expectEqualSlices(u8, t.expected, outstr);
-        } else {
-            try testing.expectEqualSlices(u8, t.expected, "null");
-        }
+        const outstr = try vm.memory.ObjectToString(object, &buffer);
+        try testing.expectEqualSlices(u8, t.expected, outstr);
     }
 }
 

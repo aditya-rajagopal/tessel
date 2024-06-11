@@ -136,6 +136,9 @@ pub const Opcode = enum(u8) {
     set_global,
     get_global,
     pop,
+    array,
+    index_into,
+    index_range,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
@@ -159,6 +162,9 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .set_global = &[_]u8{2},
     .get_global = &[_]u8{2},
     .pop = &[_]u8{0},
+    .array = &[_]u8{2},
+    .index_into = &[_]u8{0},
+    .index_range = &[_]u8{0},
 });
 
 test "test_definitions" {
@@ -223,6 +229,9 @@ test "make instructions string" {
     try make(&insts, .set_global, &[_]u32{7});
     try make(&insts, .get_global, &[_]u32{5});
     try make(&insts, .pop, &[_]u32{});
+    try make(&insts, .array, &[_]u32{3});
+    try make(&insts, .index_into, &[_]u32{});
+    try make(&insts, .index_range, &[_]u32{});
 
     const expected_str =
         \\0000 load_const 1
@@ -246,6 +255,9 @@ test "make instructions string" {
         \\0032 set_global 7
         \\0035 get_global 5
         \\0038 pop
+        \\0039 array 3
+        \\0042 index_into
+        \\0043 index_range
         \\
     ;
 

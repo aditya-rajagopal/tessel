@@ -84,12 +84,12 @@ pub fn start() !void {
             try vm.run();
 
             try stdout.print("{d}\n", .{vm.memory.instructions.items});
-            _ = vm.memory.stack_top() orelse {
-                try bw.flush();
-                continue;
-            };
 
-            const outstr = try Memory.ObjectToString(try vm.memory.stack_pop(), &buffer);
+            const sptr = vm.memory.stack_top() orelse 0;
+            const object = vm.memory.memory.get(sptr);
+            std.debug.print("Instruction pointer: {d}\n", .{vm.memory.ins_ptr});
+
+            const outstr = try vm.memory.ObjectToString(object, &buffer);
             try stdout.print("Output >> {s}\n", .{outstr});
             try bw.flush();
         }
