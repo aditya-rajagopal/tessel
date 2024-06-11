@@ -71,6 +71,8 @@ pub fn start() !void {
                 continue;
             }
 
+            ast.print_to_stderr();
+
             var compiler = try Compiler.create(allocator, &identifier_map, &vm.memory);
 
             try compiler.compile(&ast, 0);

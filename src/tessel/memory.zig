@@ -274,6 +274,32 @@ pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
     }
 }
 
+pub fn dupe_onto_stack(self: *Memory, addr: MemoryAddress) !void {
+    const data = self.get(addr);
+
+    switch (data.dtype) {
+        .integer => {
+            try self.stack_push_create(.integer, @ptrCast(&data.data.integer));
+        },
+        .string => {
+            var output = try data.data.string_type.clone(self.allocator);
+            try self.stack_push_create(.string, @ptrCast(&(try output.toOwnedSlice(self.allocator))));
+        },
+        .array => {
+            var new_objects = try std.ArrayList(MemoryAddress).initCapacity(self.allocator, data.data.array.items.len);
+            for (0..data.data.array.items.len) |i| {
+                new_objects.appendAssumeCapacity(try self.dupe(data.data.array.items[i]));
+            }
+            try self.stack_push_create(.array, @ptrCast(&(try new_objects.toOwnedSlice())));
+        },
+        .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => {
+            try self.stack_push(data);
+        },
+        .runtime_error => unreachable,
+        .hash_map => unreachable,
+    }
+}
+
 pub fn free(self: *Memory, ptr: MemoryAddress) void {
     std.debug.assert(ptr <= self.memory.len);
     // std.debug.assert(ptr >= stack_limit);
@@ -531,7 +557,9 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
 
     var memory_slice = self.memory.slice();
     if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
-        self.free(self.stack_ptr);
+        const tag = memory_slice.items(.tag)[self.stack_ptr];
+        if (tag != .constant and tag != .heap)
+            self.free(self.stack_ptr);
     }
 
     memory_slice.set(self.stack_ptr, element);

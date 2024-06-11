@@ -200,6 +200,19 @@ pub const Node = struct {
     pub const NodeData = struct { lhs: NodeIndex, rhs: NodeIndex };
 };
 
+pub fn print_to_stderr(self: *Ast) void {
+    std.debug.print("AST: \n", .{});
+    for (0..self.nodes.len) |i| {
+        std.debug.print("\t", .{});
+        std.debug.print("Node[{d}] \t", .{i});
+        const node = self.nodes.get(i);
+        std.debug.print("tag: {s:<20}", .{@tagName(node.tag)});
+        const main_token = self.tokens.get(node.main_token);
+        std.debug.print("main_token: {s:<12}", .{@tagName(main_token.tag)});
+        std.debug.print("Childrens: lhs: {d}, rhs:{d}\n", .{ node.node_data.lhs, node.node_data.rhs });
+    }
+}
+
 pub const Error = struct {
     tag: Tag,
     token: TokenArrayIndex,

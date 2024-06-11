@@ -171,11 +171,11 @@ fn eval_index_range(self: *VM) !void {
 
     const left_index = left_range.data.integer;
     const right_index = right_range.data.integer;
-    if (left_index >= len or left_index < -(len - 1)) {
+    if (left_index >= len or left_index < -len) {
         return Error.IndexOutOfBounds;
     }
 
-    if (right_index > len or right_index < -(len - 1)) {
+    if (right_index > len or right_index < -len) {
         return Error.IndexOutOfBounds;
     }
 
@@ -192,6 +192,7 @@ fn eval_index_range(self: *VM) !void {
         right = @as(usize, @intCast(len + right_index));
     }
 
+    std.debug.print("left: {d}, right: {d}\n", .{ left, right });
     if (left > right) {
         return Error.IndexOutOfBounds;
     }
@@ -229,7 +230,8 @@ fn eval_index_into(self: *VM) !void {
 
     const value = index.data.integer;
 
-    if (value >= len or value < -(len - 1)) {
+    if (value >= len or value < -(len)) {
+        std.debug.print("value: {d}, len: {d}\n", .{ value, len });
         return Error.IndexOutOfBounds;
     }
 
@@ -242,9 +244,9 @@ fn eval_index_into(self: *VM) !void {
 
     switch (literal.dtype) {
         .array => {
-            var location = literal.data.array.items[i];
-            location = try self.memory.dupe(location);
-            try self.memory.stack_push(self.memory.get(location));
+            const location = literal.data.array.items[i];
+            try self.memory.dupe_onto_stack(location);
+            // try self.memory.stack_push(self.memory.get(location));
         },
         .string => {
             const character = literal.data.string_type.items[i];
@@ -413,8 +415,6 @@ test "vm_init" {
     defer ast.deinit(testing.allocator);
 
     try compiler.compile(&ast, 0);
-    // const self.memory: ByteCode = try compiler.get_self.memory();
-    // self.memory.deinit(testing.allocator);
 }
 
 const VMTestCase = struct {
@@ -497,7 +497,8 @@ test "evaluate_string_expressions" {
         .{ .source = "const a = \"foobar\"; a[0];", .expected = "f" },
         .{ .source = "const a = \"foobar\"; a[0] + a[-1];", .expected = "fr" },
         .{ .source = "const a = \"foobar\"; a[0:2];", .expected = "fo" },
-        // .{ .source = "const a = \"foobar\"; a[0:2][0];", .expected = "f" },
+        .{ .source = "const a = \"foobar\"; a[3:6][0:2];", .expected = "ba" },
+        .{ .source = "const a = \"foobar\"; a[0:2][0];", .expected = "f" },
         .{ .source = "const a = \"foobar\"; a[0:3] + a[3:6];", .expected = "foobar" },
 
         // .{
@@ -588,11 +589,17 @@ test "run_arrays" {
         .{ .source = "const a = [1, 2, 3]; a;", .expected = "[1, 2, 3, ]" },
         .{ .source = "const a = [1, \"two\", 3]; a;", .expected = "[1, two, 3, ]" },
         .{ .source = "const a = [1, [1, 2], 3]; a[1];", .expected = "[1, 2, ]" },
-        // .{ .source = "const a = [1, [1, 2], 3]; a[1][0];", .expected = "1" },
+        .{ .source = "const a = [1, [1, 2], 3]; a[1][0];", .expected = "1" },
+        .{ .source = "const a = [1, [1, 2], [[3, 4], [5, 6]]]; a[2][1][0];", .expected = "5" },
+        .{ .source = "const a = [1, [1, 2], [[3, 4], [\"five\", 6]]]; a[2][1][0][1];", .expected = "i" },
         .{ .source = "const a = [1, 2, 3]; a[-1];", .expected = "3" },
         .{ .source = "const a = [1, 2, 3]; a[0:1];", .expected = "[1, ]" },
         .{ .source = "const a = [1, 2, 3]; a[0:2];", .expected = "[1, 2, ]" },
+        .{ .source = "const a = [1, 2, 3]; a[1:3][0];", .expected = "2" },
         .{ .source = "const a = [1, [1, 2], 3]; a[0:2];", .expected = "[1, [1, 2, ], ]" },
+        .{ .source = "const a = [1, [1, 2], [[1, 3]]]; a[-1][-1][-1];", .expected = "3" },
+        .{ .source = "const a = [1, [1, 2], [[1, 3]]]; a[-3:-1];", .expected = "[1, [1, 2, ], ]" },
+        .{ .source = "const a = [1, [1, 2], [[1, 3]]]; a[-3:-1][-1][0];", .expected = "1" },
         // .{ .source = "const last = fn(x) { return x[-1] }; last([1, 2, 3]);", .expected = "3" },
     };
 

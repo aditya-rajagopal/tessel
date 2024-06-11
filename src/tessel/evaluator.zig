@@ -1586,6 +1586,8 @@ test "evaluate_arrays" {
         .{ .source = "[1, \"two\", 3][1]", .output = "two" },
         .{ .source = "const a = [1, 2, 3]; a;", .output = "[1, 2, 3, ]" },
         .{ .source = "const a = [1, 2, 3]; a[-1];", .output = "3" },
+        .{ .source = "const a = [1, [1, 2], 3]; a[1];", .output = "[1, 2, ]" },
+        .{ .source = "const a = [1, [1, 2], 3]; a[1][0];", .output = "1" },
         .{ .source = "const last = fn(x) { return x[-1] }; last([1, 2, 3]);", .output = "3" },
     };
 

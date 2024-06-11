@@ -456,7 +456,14 @@ fn parse_expression_precedence(self: *Parser, min_presedence: i32) Error!Ast.Nod
             continue;
         }
         if (self.token_tags[operator_token] == .LBRACKET) {
-            if (self.nodes.get(cur_node).tag != .IDENTIFIER and self.nodes.get(cur_node).tag != .ARRAY_LITERAL and self.nodes.get(cur_node).tag != .STRING_LITERAL and self.nodes.get(cur_node).tag != .HASH_LITERAL) {
+            const curr_node_tag = self.nodes.get(cur_node).tag;
+            if (curr_node_tag != .IDENTIFIER and
+                curr_node_tag != .ARRAY_LITERAL and
+                curr_node_tag != .STRING_LITERAL and
+                curr_node_tag != .HASH_LITERAL and
+                curr_node_tag != .INDEX_INTO and
+                curr_node_tag != .INDEX_RANGE)
+            {
                 self.token_current -= 1;
                 break;
             }
@@ -685,6 +692,11 @@ fn parse_map(self: *Parser) Error!Ast.Node.NodeIndex {
 
 fn parse_array_literal(self: *Parser) Error!Ast.Node.NodeIndex {
     std.debug.assert(self.is_current_token(.LBRACKET));
+    // const last_node_tag = self.nodes.get(self.nodes.len - 1).tag;
+    // if (last_node_tag == .INDEX_INTO or last_node_tag == .INDEX_RANGE) {
+    //     std.debug.print("Getting a double index operation\n", .{});
+    //     return self.parse_index_into(@as(u32, @intCast(self.nodes.len - 1)), self.next_token());
+    // }
     const array_literal_token = self.next_token();
     if (self.is_current_token(.RBRACKET)) {
         _ = self.eat_token(.RBRACKET);
