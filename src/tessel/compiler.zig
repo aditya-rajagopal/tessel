@@ -4,7 +4,12 @@ memory: *Memory,
 allocator: Allocator,
 symbol_table: *SymbolTable,
 
-pub const CompilerErrors = error{ IllegalAstNodeReference, ReferencingRootNode, AssigningToConst };
+pub const CompilerErrors = error{
+    IllegalAstNodeReference,
+    ReferencingRootNode,
+    AssigningToConst,
+    EmptyHashLiteral,
+};
 const Error = CompilerErrors || Allocator.Error;
 
 pub fn create(allocator: Allocator, map: *SymbolTable, memory: *Memory) !Compiler {
@@ -62,14 +67,14 @@ fn compile_statement(
     switch (ast_node.tag) {
         .EXPRESSION_STATEMENT => {
             if (is_last) {
-                try self.eval_expression(ast, ast_node.node_data.lhs);
+                try self.compile_expression(ast, ast_node.node_data.lhs);
                 if (pop_last) {
                     try self.emit(.pop, &[_]u32{});
                 }
             } else {
                 const start = self.memory.instructions.items.len;
                 const obj_start = self.memory.constants.items.len;
-                try self.eval_expression(ast, ast_node.node_data.lhs);
+                try self.compile_expression(ast, ast_node.node_data.lhs);
                 const end = self.memory.instructions.items.len;
                 var i = start;
                 var is_modifying = false;
@@ -94,12 +99,12 @@ fn compile_statement(
             }
         },
         .VAR_STATEMENT => {
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             const ident = ast.nodes.get(ast_node.node_data.lhs);
             try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
         },
         .ASSIGNMENT_STATEMENT => {
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             const ident = ast.nodes.get(ast_node.node_data.lhs);
             if (ident.node_data.rhs == 0) {
                 return Error.AssigningToConst;
@@ -107,15 +112,15 @@ fn compile_statement(
             try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
         },
         .WHILE_LOOP => {
-            try self.eval_while_loop(ast, ast_node);
+            try self.compile_while_loop(ast, ast_node);
         },
         else => unreachable,
     }
 }
 
-fn eval_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void {
+fn compile_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void {
     const eval_start: u32 = @intCast(self.memory.instructions.items.len);
-    try self.eval_expression(ast, node.node_data.lhs);
+    try self.compile_expression(ast, node.node_data.lhs);
     const jn_pos = self.memory.instructions.items.len;
     try self.emit(.jn, &[_]u32{9090});
 
@@ -132,7 +137,7 @@ fn eval_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void 
     try self.emit(.pop, &[_]u32{});
 }
 
-fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) Error!void {
+fn compile_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) Error!void {
     if (node >= ast.nodes.len) {
         return Error.IllegalAstNodeReference;
     }
@@ -162,23 +167,22 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
         .ARRAY_LITERAL => {
             try self.emit_array_literal(ast, ast_node);
         },
-        // <lbracket><integer><colon><integer><rbracket>
-        // main_token = :
-        // lhs = expression/identifier/literal that returns an array or strign
-        // rhs = position into extra data for the 2 expressions that evaluate to the start and end of the range.
         .INDEX_RANGE => {
             // the array or string
-            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
             // the left and right ranges
             const loc = ast_node.node_data.rhs;
-            try self.eval_expression(ast, ast.extra_data[loc]);
-            try self.eval_expression(ast, ast.extra_data[loc + 1]);
+            try self.compile_expression(ast, ast.extra_data[loc]);
+            try self.compile_expression(ast, ast.extra_data[loc + 1]);
             try self.emit(.index_range, &[_]u32{});
         },
         .INDEX_INTO => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             try self.emit(.index_into, &[_]u32{});
+        },
+        .HASH_LITERAL => {
+            try self.emit_hash_literal(ast, ast_node);
         },
         .IDENTIFIER => {
             try self.emit(.get_global, &[_]u32{ast_node.node_data.lhs});
@@ -197,33 +201,33 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
         .MULTIPLY,
         .DIVIDE,
         => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             try self.emit_infix_op(ast_node.tag);
         },
         .LESS_THAN,
         .LESS_THAN_EQUAL,
         => {
-            try self.eval_expression(ast, ast_node.node_data.rhs);
-            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
             try self.emit_infix_op(ast_node.tag);
         },
         .NOT_EQUAL => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             try self.emit(.neq, &[_]u32{});
         },
         .DOUBLE_EQUAL => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
-            try self.eval_expression(ast, ast_node.node_data.rhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.rhs);
             try self.emit(.eq, &[_]u32{});
         },
         .BOOL_NOT => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
             try self.emit(.not, &[_]u32{});
         },
         .NEGATION => {
-            try self.eval_expression(ast, ast_node.node_data.lhs);
+            try self.compile_expression(ast, ast_node.node_data.lhs);
             try self.emit(.neg, &[_]u32{});
         },
         .NAKED_IF, .IF_ELSE => {
@@ -231,6 +235,24 @@ fn eval_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex) E
         },
         else => unreachable,
     }
+}
+
+fn emit_hash_literal(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
+    const hash_start = ast_node.node_data.lhs;
+    const hash_end = ast_node.node_data.rhs;
+    if (hash_end == 0) {
+        return Error.EmptyHashLiteral;
+    }
+
+    const hashes = ast.extra_data[hash_start..hash_end];
+
+    for (hashes) |hash| {
+        const node = ast.nodes.get(hash);
+        try self.compile_expression(ast, node.node_data.lhs);
+        try self.compile_expression(ast, node.node_data.rhs);
+    }
+
+    try self.emit(.make_hash, &[_]u32{@as(u32, @intCast(hashes.len))});
 }
 
 fn emit_array_literal(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
@@ -242,14 +264,14 @@ fn emit_array_literal(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
 
     const expressions = ast.extra_data[expression_start..expression_end];
     for (0..expressions.len) |i| {
-        try self.eval_expression(ast, expressions[expressions.len - 1 - i]);
+        try self.compile_expression(ast, expressions[expressions.len - 1 - i]);
     }
     try self.emit(.array, &[_]u32{@as(u32, @intCast(expressions.len))});
 }
 
 fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
     // Emit condition evaluation
-    try self.eval_expression(ast, ast_node.node_data.lhs);
+    try self.compile_expression(ast, ast_node.node_data.lhs);
 
     const jn_pos = self.memory.instructions.items.len;
     try self.emit(.jn, &[_]u32{9090});

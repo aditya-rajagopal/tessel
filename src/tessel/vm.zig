@@ -3,7 +3,7 @@ pub const VM = @This();
 memory: Memory,
 allocator: Allocator,
 
-pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch, IndexOutOfBounds };
+pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch, IndexOutOfBounds, InvalidKey };
 pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
 pub const memory_reservation = 65536;
@@ -23,8 +23,7 @@ pub fn run(self: *VM) !void {
     // var self.memory.ins_ptr: usize = @intCast(start_index);
     while (self.memory.ins_ptr < self.memory.instructions.items.len) {
         const op: Code.Opcode = @enumFromInt(self.memory.instructions.items[self.memory.ins_ptr]);
-        // std.debug.print("Index: {d} op:{s}\n", .{ self.memory.ins_ptr, @tagName(op) });
-
+        // std.debug.print("Running op: {s}\n", .{@tagName(op)});
         switch (op) {
             .load_const => {
                 const obj_index = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
@@ -52,6 +51,7 @@ pub fn run(self: *VM) !void {
             },
             .index_into => try self.eval_index_into(),
             .index_range => try self.eval_index_range(),
+            .make_hash => try self.eval_hash_literal(),
             .pop => {
                 if (self.memory.stack_ptr == 0) {
                     self.memory.ins_ptr += 1;
@@ -152,6 +152,34 @@ pub fn run(self: *VM) !void {
     }
 }
 
+fn eval_hash_literal(self: *VM) !void {
+    const num_hashes: u32 = @intCast(std.mem.bytesToValue(
+        u16,
+        self.memory.instructions.items[self.memory.ins_ptr + 1 ..],
+    ));
+    self.memory.ins_ptr += 2;
+
+    const map = try self.memory.alloc(.hash_map, @ptrCast(&num_hashes));
+    const map_data = self.memory.get(map);
+
+    for (0..num_hashes) |_| {
+        const value = try self.memory.move_stack_top_to_heap();
+        const key = try self.memory.move_stack_top_to_heap();
+        var memory_slice = self.memory.memory.slice();
+        const key_data = memory_slice.get(key);
+        if (key_data.dtype != .integer and key_data.dtype != .boolean and key_data.dtype != .string) {
+            return Error.InvalidKey;
+        }
+        const hash = Memory.MemoryObject.HashKey.create(key_data);
+        try map_data.data.hash_map.map.put(self.allocator, hash, value);
+        try map_data.data.hash_map.keys.append(self.allocator, key);
+        self.memory.increase_ref(value);
+        self.memory.increase_ref(key);
+    }
+
+    try self.memory.move_heap_to_stack_top(map);
+}
+
 fn eval_index_range(self: *VM) !void {
     const right_range = try self.memory.stack_pop();
     if (right_range.dtype != .integer) {
@@ -192,7 +220,6 @@ fn eval_index_range(self: *VM) !void {
         right = @as(usize, @intCast(len + right_index));
     }
 
-    std.debug.print("left: {d}, right: {d}\n", .{ left, right });
     if (left > right) {
         return Error.IndexOutOfBounds;
     }
@@ -217,10 +244,28 @@ fn eval_index_range(self: *VM) !void {
 
 fn eval_index_into(self: *VM) !void {
     const index = try self.memory.stack_pop();
+    const literal = try self.memory.stack_pop();
+    if (literal.dtype == .hash_map) {
+        if (index.dtype != .integer and index.dtype != .boolean and index.dtype != .string) {
+            return Error.InvalidKey;
+        }
+        const hash = Memory.MemoryObject.HashKey.create(index);
+        const value = literal.data.hash_map.map.get(hash);
+        if (value) |val| {
+            try self.memory.dupe_onto_stack(val);
+            return;
+        } else {
+            return Error.InvalidKey;
+        }
+    }
+
+    if (literal.dtype != .array and literal.dtype != .string) {
+        return Error.TypeMismatch;
+    }
+
     if (index.dtype != .integer) {
         return Error.TypeMismatch;
     }
-    const literal = try self.memory.stack_pop();
 
     const len = switch (literal.dtype) {
         .array => @as(i64, @intCast(literal.data.array.items.len)),
@@ -231,7 +276,6 @@ fn eval_index_into(self: *VM) !void {
     const value = index.data.integer;
 
     if (value >= len or value < -(len)) {
-        std.debug.print("value: {d}, len: {d}\n", .{ value, len });
         return Error.IndexOutOfBounds;
     }
 
@@ -441,7 +485,7 @@ test "vm_test_arithmetic" {
         .{ .source = "(5 + 10 * 2 + 15 / 3) * 2 + -10", .expected = "50" },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
 test "run_bool_tests" {
@@ -466,7 +510,7 @@ test "run_bool_tests" {
         .{ .source = "(1 > 2) == true", .expected = "false" },
         .{ .source = "(1 > 2) == false", .expected = "true" },
     };
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
 test "run_if_expressions" {
@@ -482,7 +526,7 @@ test "run_if_expressions" {
         .{ .source = "if (1 < 2) { if ( 3 < 2 ) { 30 } else{ if (1 < 2 * 5 + 3) { 10 } }} else { 20 }", .expected = "10" },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 test "evaluate_string_expressions" {
     const tests = [_]VMTestCase{
@@ -500,7 +544,6 @@ test "evaluate_string_expressions" {
         .{ .source = "const a = \"foobar\"; a[3:6][0:2];", .expected = "ba" },
         .{ .source = "const a = \"foobar\"; a[0:2][0];", .expected = "f" },
         .{ .source = "const a = \"foobar\"; a[0:3] + a[3:6];", .expected = "foobar" },
-
         // .{
         //     .source = "const a = \"foo\"; const b = \"bar\"; var c = fn(x) { return x + \"baz\";}; c(a) + \" \" +c(b);",
         //     .expected = "foobaz barbaz",
@@ -521,7 +564,7 @@ test "evaluate_string_expressions" {
         // .{ .source = "\"foobar\"[-1]", .expected = "r" },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
 test "evaluate_while_loops" {
@@ -550,7 +593,7 @@ test "evaluate_while_loops" {
         // },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
 test "run_prefix_not" {
@@ -577,7 +620,7 @@ test "run_prefix_not" {
         },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
 test "run_arrays" {
@@ -603,7 +646,38 @@ test "run_arrays" {
         // .{ .source = "const last = fn(x) { return x[-1] }; last([1, 2, 3]);", .expected = "3" },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
+}
+
+test "run_hashes" {
+    const tests = [_]VMTestCase{
+        .{ .source = "{1: 2, 3: 4, 5: 6}", .expected = "{1:2, 3:4, 5:6, }" },
+        .{ .source = "{1: 2, 3: 4, 5: 6}[3]", .expected = "4" },
+        .{ .source = "const a = {1: 2, 3: 4, 5: 6}; a", .expected = "{1:2, 3:4, 5:6, }" },
+        .{ .source = "const a = {1: 2, 3: 4, 5: 6}; a[5]", .expected = "6" },
+        .{
+            .source = "const three = true; const a = {1: \"one\", \"two\": 2, true: three}; a",
+            .expected = "{1:one, two:2, true:true, }",
+        },
+        .{
+            .source = "const three = true; const a = {1: \"one\", \"two\": 2, true: three}; a[\"two\"]",
+            .expected = "2",
+        },
+        .{
+            .source = "const three = \"three\"; const a = {1: \"one\", \"two\": 2, true: three}; a",
+            .expected = "{1:one, two:2, true:three, }",
+        },
+        .{
+            .source = " const str = \"two\"; const three = [1, str, 3]; const two = {1: str, 2: str}; const a = {1: \"one\", \"two\": two, true: three}; a",
+            .expected = "{1:one, two:{1:two, 2:two, }, true:[1, two, 3, ], }",
+        },
+        .{
+            .source = " const str = \"two\"; const three = [1, str, 3]; const two = {1: str, 2: str}; const a = {1: \"one\", \"two\": two, true: three}; a[\"two\"][2]",
+            .expected = "two",
+        },
+    };
+
+    try run_vm_tests(&tests, false);
 }
 
 test "evaluate_identifiers" {
@@ -621,19 +695,23 @@ test "evaluate_identifiers" {
             .source = "var a = 2 * 2; const b = a + 3; if ( a < b ) { a = 5; } else { a = 2; }; a; ",
             .expected = "5",
         },
+        .{ .source = "const a = \"three\"; const b = a; b;", .expected = "three" },
+        .{ .source = "const str = \"three\"; const a = [1, 2, str]; const b = a; b;", .expected = "[1, 2, three, ]" },
         // .{
         //     .source = "var a = 2 * 2; const b = a + 3; const c = if ( a < b ) { return a + 5; } else { return true; }; c; ",
         //     .expected = "9",
         // },
     };
 
-    try run_vm_tests(&tests);
+    try run_vm_tests(&tests, false);
 }
 
-fn run_vm_tests(tests: []const VMTestCase) !void {
+fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {
-        // std.debug.print("Source: {s}\n", .{t.source});
+        if (debug_print) {
+            std.debug.print("Source: {s}\n", .{t.source});
+        }
         var symbol_table = SymbolTable.init();
         defer symbol_table.deinit(testing.allocator);
         var vm = try VM.init(testing.allocator, false);
@@ -641,13 +719,17 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
 
         var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
         defer ast.deinit(testing.allocator);
-
+        if (debug_print) {
+            ast.print_to_stderr();
+        }
         var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
         try compiler.compile(&ast, 0);
 
-        // const out = try Code.code_to_str(testing.allocator, vm.memory.instructions.items);
-        // defer testing.allocator.free(out);
-        // std.debug.print("Instructions:\n{s}\n", .{out});
+        if (debug_print) {
+            const out = try Code.code_to_str(testing.allocator, vm.memory.instructions.items);
+            defer testing.allocator.free(out);
+            std.debug.print("Instructions:\n{s}\n", .{out});
+        }
         try vm.run();
 
         const sptr = vm.memory.stack_top() orelse 0;
@@ -657,6 +739,9 @@ fn run_vm_tests(tests: []const VMTestCase) !void {
 
         const outstr = try vm.memory.ObjectToString(object, &buffer);
         try testing.expectEqualSlices(u8, t.expected, outstr);
+        if (debug_print) {
+            std.debug.print("Test Passed!\n", .{});
+        }
     }
 }
 

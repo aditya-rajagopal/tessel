@@ -249,7 +249,6 @@ pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const
 
 pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
     const data = self.get(addr);
-
     switch (data.dtype) {
         .integer => {
             const obj = try self.alloc(.integer, @ptrCast(&data.data.integer));
@@ -268,9 +267,23 @@ pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
             const obj = try self.alloc(.array, @ptrCast(&(try new_objects.toOwnedSlice())));
             return obj;
         },
+        .hash_map => {
+            var keys = data.data.hash_map.keys.items;
+            const map = try self.alloc(.hash_map, @ptrCast(&keys.len));
+            const map_data = self.memory.get(map);
+            for (keys) |key| {
+                const new_key = try self.dupe(key);
+                const hash = MemoryObject.HashKey.create(self.get(new_key));
+                const value = try self.dupe(data.data.hash_map.map.get(hash).?);
+                map_data.data.hash_map.map.putAssumeCapacity(hash, value);
+                map_data.data.hash_map.keys.appendAssumeCapacity(new_key);
+                self.increase_ref(value);
+                self.increase_ref(new_key);
+            }
+            return map;
+        },
         .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => return addr,
         .runtime_error => unreachable,
-        .hash_map => unreachable,
     }
 }
 
@@ -292,17 +305,30 @@ pub fn dupe_onto_stack(self: *Memory, addr: MemoryAddress) !void {
             }
             try self.stack_push_create(.array, @ptrCast(&(try new_objects.toOwnedSlice())));
         },
+        .hash_map => {
+            var keys = data.data.hash_map.keys.items;
+            const map = self.stack_ptr;
+            try self.stack_push_create(.hash_map, @ptrCast(&keys.len));
+            const map_data = self.memory.get(map);
+            for (keys) |key| {
+                const new_key = try self.dupe(key);
+                const hash = MemoryObject.HashKey.create(self.get(new_key));
+                const value = try self.dupe(data.data.hash_map.map.get(hash).?);
+                map_data.data.hash_map.map.putAssumeCapacity(hash, value);
+                map_data.data.hash_map.keys.appendAssumeCapacity(new_key);
+                self.increase_ref(value);
+                self.increase_ref(new_key);
+            }
+        },
         .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => {
             try self.stack_push(data);
         },
         .runtime_error => unreachable,
-        .hash_map => unreachable,
     }
 }
 
 pub fn free(self: *Memory, ptr: MemoryAddress) void {
     std.debug.assert(ptr <= self.memory.len);
-    // std.debug.assert(ptr >= stack_limit);
     if (ptr < self.reserved_memory and ptr >= stack_limit) {
         return;
     }
@@ -395,7 +421,8 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
     var memory_slice = self.memory.slice();
 
     if (ptr > reserved_objects) {
-        if (memory_slice.items(.tag)[ptr] != .constant) {
+        const tag = memory_slice.items(.tag)[ptr];
+        if (tag != .constant and tag != .heap) {
             // switch (memory_slice.items(.dtype)[ptr]) {
             //     .string, .array => self.destroy(ptr),
             //     else => {},
@@ -425,7 +452,7 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
         else => {},
     }
 
-    if (data.tag == .constant) {
+    if (data.tag == .constant or data.tag == .heap) {
         ptr = try self.dupe(self.stack_ptr);
         if (ptr > self.reserved_memory) {
             self.globals[id] = ptr;
@@ -475,7 +502,7 @@ pub fn move_stack_top_to_heap(self: *Memory) !MemoryAddress {
         else => {},
     }
 
-    if (data.tag == .constant) {
+    if (data.tag == .constant or data.tag == .heap) {
         heap_addr = try self.dupe(self.stack_ptr);
         if (heap_addr > self.reserved_memory) {
             var memory_slice = self.memory.slice();
@@ -503,6 +530,25 @@ pub fn move_stack_top_to_heap(self: *Memory) !MemoryAddress {
     return heap_addr;
 }
 
+/// Invalidates all pointers to given object but does not copy or move the child objects of array and hasmaps
+/// the ownership of all data is moved to the stack
+pub fn move_heap_to_stack_top(self: *Memory, ptr: MemoryAddress) !void {
+    const data: MemoryObject = self.memory.get(ptr);
+    try self.stack_push(data);
+    switch (data.tag) {
+        .heap => {
+            var memory_slice = self.memory.slice();
+            memory_slice.items(.dtype)[ptr] = .integer;
+            memory_slice.items(.data)[ptr].integer = 0;
+            memory_slice.items(.refs)[ptr] = 0;
+            self.free(ptr);
+            memory_slice.items(.tag)[self.stack_ptr - 1] = .stack;
+            return;
+        },
+        else => return,
+    }
+}
+
 pub fn get_global(self: *Memory, id: GlobalID) !void {
     std.debug.assert(id < globals_limit);
     const ptr = self.globals[id];
@@ -521,7 +567,10 @@ pub fn shrink_constants(self: *Memory, new_len: usize) void {
 
 pub fn increase_ref(self: *Memory, ptr: MemoryAddress) void {
     std.debug.assert(ptr < self.memory.len);
-    std.debug.assert(ptr >= reserved_objects);
+    std.debug.assert(ptr >= stack_limit);
+    if (ptr < self.reserved_memory) {
+        return;
+    }
     self.memory.items(.refs)[ptr] += 1;
 }
 
@@ -559,7 +608,7 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
     if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
         const tag = memory_slice.items(.tag)[self.stack_ptr];
         if (tag != .constant and tag != .heap)
-            self.free(self.stack_ptr);
+            self.destroy(self.stack_ptr);
     }
 
     memory_slice.set(self.stack_ptr, element);
@@ -641,7 +690,7 @@ pub const MemoryObject = struct {
         };
 
         pub fn create(key: MemoryObject) HashKey {
-            switch (key.type) {
+            switch (key.dtype) {
                 .integer => {
                     if (key.data.integer >= 0) {
                         return .{
@@ -669,7 +718,7 @@ pub const MemoryObject = struct {
                     }
                 },
                 .string => {
-                    const slice = key.data.string_type.ptr[0..key.data.string_type.len];
+                    const slice = key.data.string_type.items;
                     const hash = std.hash.Wyhash.hash(0, slice);
                     return .{
                         .type = .string_key,
@@ -751,13 +800,33 @@ pub fn ObjectToString(self: *Memory, obj: MemoryObject, buffer: []u8) ![]const u
             try local_array.appendSlice("]");
             return std.fmt.bufPrint(buffer, "{s}", .{local_array.items});
         },
+        .hash_map => {
+            var local_buffer: [10240]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&local_buffer);
+            const allocator = fba.allocator();
+            var local_array = std.ArrayList(u8).init(allocator);
+            defer local_array.deinit();
+
+            try local_array.appendSlice("{");
+            const len = obj.data.hash_map.keys.items.len;
+            for (0..len) |k| {
+                const key_data = self.get(obj.data.hash_map.keys.items[len - 1 - k]);
+                const hash = MemoryObject.HashKey.create(key_data);
+                try local_array.appendSlice(try self.ObjectToString(key_data, buffer));
+                try local_array.appendSlice(":");
+                const value = obj.data.hash_map.map.get(hash).?;
+                try local_array.appendSlice(try self.ObjectToString(self.get(value), buffer));
+                try local_array.appendSlice(", ");
+            }
+            try local_array.appendSlice("}");
+            return std.fmt.bufPrint(buffer, "{s}", .{local_array.items});
+        },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
         .builtin => unreachable,
         .return_expression => unreachable,
         .break_statement => return std.fmt.bufPrint(buffer, "break", .{}),
         .continue_statement => return std.fmt.bufPrint(buffer, "continue", .{}),
-        else => return std.fmt.bufPrint(buffer, "null", .{}),
     }
 }
 
