@@ -211,6 +211,8 @@ pub fn print_to_stderr(self: *Ast) void {
         std.debug.print("main_token: {s:<12}", .{@tagName(main_token.tag)});
         std.debug.print("Childrens: lhs: {d}, rhs:{d}\n", .{ node.node_data.lhs, node.node_data.rhs });
     }
+    std.debug.print("Extra Nodes: \n", .{});
+    std.debug.print("\t {d}\n", .{self.extra_data});
 }
 
 pub const Error = struct {

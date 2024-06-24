@@ -140,6 +140,8 @@ pub const Opcode = enum(u8) {
     index_into,
     index_range,
     make_hash,
+    call,
+    op_return,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
@@ -167,6 +169,8 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .index_into = &[_]u8{0},
     .index_range = &[_]u8{0},
     .make_hash = &[_]u8{2},
+    .call = &[_]u8{0},
+    .op_return = &[_]u8{0},
 });
 
 test "test_definitions" {
@@ -235,6 +239,8 @@ test "make instructions string" {
     try make(&insts, .index_into, &[_]u32{});
     try make(&insts, .index_range, &[_]u32{});
     try make(&insts, .make_hash, &[_]u32{3});
+    try make(&insts, .call, &[_]u32{});
+    try make(&insts, .op_return, &[_]u32{});
 
     const expected_str =
         \\0000 load_const 1
@@ -262,6 +268,8 @@ test "make instructions string" {
         \\0042 index_into
         \\0043 index_range
         \\0044 make_hash 3
+        \\0047 call
+        \\0048 op_return
         \\
     ;
 

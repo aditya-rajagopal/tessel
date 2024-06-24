@@ -3,7 +3,13 @@ pub const VM = @This();
 memory: Memory,
 allocator: Allocator,
 
-pub const VMError = error{ InsufficientOperandsOnStack, TypeMismatch, IndexOutOfBounds, InvalidKey };
+pub const VMError = error{
+    InsufficientOperandsOnStack,
+    TypeMismatch,
+    IndexOutOfBounds,
+    InvalidKey,
+    CallingNonFunction,
+};
 pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
 pub const memory_reservation = 65536;
@@ -20,14 +26,18 @@ pub fn deinit(self: *VM) void {
 }
 
 pub fn run(self: *VM) !void {
+    try self.memory.stack_frames.push(self.allocator, self.memory.instructions.items, self.memory.ins_ptr);
+
     // var self.memory.ins_ptr: usize = @intCast(start_index);
-    while (self.memory.ins_ptr < self.memory.instructions.items.len) {
-        const op: Code.Opcode = @enumFromInt(self.memory.instructions.items[self.memory.ins_ptr]);
-        // std.debug.print("Running op: {s}\n", .{@tagName(op)});
+
+    while (self.memory.stack_frames.current_frame().ins_ptr < self.memory.stack_frames.current_frame().ins.len) {
+        const current_frame = self.memory.stack_frames.current_frame();
+        const op: Code.Opcode = @enumFromInt(current_frame.ins[current_frame.ins_ptr]);
+
         switch (op) {
             .load_const => {
-                const obj_index = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                self.memory.ins_ptr += 2;
+                const obj_index = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
                 try self.memory.stack_push(self.memory.get_constant(obj_index));
             },
             .ltrue => {
@@ -40,8 +50,8 @@ pub fn run(self: *VM) !void {
                 try self.memory.stack_push(self.memory.get(Memory.null_object));
             },
             .array => {
-                const num_objects = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                self.memory.ins_ptr += 2;
+                const num_objects = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
                 var data = try std.ArrayList(Memory.MemoryAddress).initCapacity(self.allocator, num_objects);
                 defer data.deinit();
                 for (0..num_objects) |_| {
@@ -52,9 +62,37 @@ pub fn run(self: *VM) !void {
             .index_into => try self.eval_index_into(),
             .index_range => try self.eval_index_range(),
             .make_hash => try self.eval_hash_literal(),
+            .call => {
+                const stack_ptr = self.memory.stack_top() orelse return VMError.CallingNonFunction;
+                const func = self.memory.memory.get(stack_ptr - 1);
+                if (func.dtype != .compiled_function) {
+                    return VMError.CallingNonFunction;
+                }
+                try self.memory.stack_frames.push(
+                    self.allocator,
+                    self.memory.function_storage.items[func.data.function.ptr .. func.data.function.ptr + func.data.function.len],
+                    0,
+                );
+                continue;
+            },
+            .op_return => esc: {
+                const return_value = try self.memory.stack_pop();
+                try self.memory.stack_frames.pop();
+
+                const stack_ptr = self.memory.stack_top() orelse {
+                    try self.memory.stack_push(self.memory.get(Memory.null_object));
+                    break :esc;
+                };
+                if (self.memory.memory.get(stack_ptr - 1).dtype != .compiled_function) {
+                    try self.memory.stack_push(self.memory.get(Memory.null_object));
+                    break :esc;
+                }
+                _ = try self.memory.stack_pop(); // remove the function
+                try self.memory.stack_push(return_value);
+            },
             .pop => {
                 if (self.memory.stack_ptr == 0) {
-                    self.memory.ins_ptr += 1;
+                    self.memory.stack_frames.inc_current_frame_ins_ptr(1);
                     continue;
                 }
                 _ = try self.memory.stack_pop();
@@ -107,8 +145,8 @@ pub fn run(self: *VM) !void {
                 }
             },
             .jmp => {
-                const destination = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                self.memory.ins_ptr = destination;
+                const destination = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.set_current_frame_ins_ptr(destination);
                 continue;
             },
             .jn => {
@@ -125,39 +163,42 @@ pub fn run(self: *VM) !void {
                 };
 
                 if (condition) {
-                    self.memory.ins_ptr += 5;
+                    self.memory.stack_frames.inc_current_frame_ins_ptr(5);
                     continue;
                 } else {
-                    const destination = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                    self.memory.ins_ptr = destination;
+                    const destination = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                    self.memory.stack_frames.set_current_frame_ins_ptr(destination);
                     continue;
                 }
             },
             .set_global => {
-                const gid = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                self.memory.ins_ptr += 2;
+                const gid = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
                 try self.memory.set_global(gid);
                 // const expr = self.memory.stack_pop();
                 // self.globals[var_self.memory.ins_ptr] = expr;
             },
             .get_global => {
-                const gid = std.mem.bytesToValue(u16, self.memory.instructions.items[self.memory.ins_ptr + 1 ..]);
-                self.memory.ins_ptr += 2;
+                const gid = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
                 try self.memory.get_global(gid);
             },
         }
-        self.memory.ins_ptr += 1;
+        self.memory.stack_frames.inc_current_frame_ins_ptr(1);
     }
+    self.memory.ins_ptr = self.memory.stack_frames.current_frame().ins_ptr;
+    try self.memory.stack_frames.pop();
 }
 
 fn eval_hash_literal(self: *VM) !void {
+    const current_frame = self.memory.stack_frames.current_frame();
     const num_hashes: u32 = @intCast(std.mem.bytesToValue(
         u16,
-        self.memory.instructions.items[self.memory.ins_ptr + 1 ..],
+        current_frame.ins[current_frame.ins_ptr + 1 ..],
     ));
-    self.memory.ins_ptr += 2;
+    self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
     const map = try self.memory.alloc(.hash_map, @ptrCast(&num_hashes));
     const map_data = self.memory.get(map);
@@ -302,9 +343,6 @@ fn eval_index_into(self: *VM) !void {
 }
 
 fn eval_string_infix(self: *VM, op: Code.Opcode, rhs: Memory.MemoryObject) !void {
-    // const memory_slice = self.memory.memory.slice();
-    // const dtype_slice = memory_slice.items(.dtype);
-    // const data_slice = memory_slice.items(.data);
     const lhs = try self.memory.stack_pop();
 
     switch (op) {
@@ -706,6 +744,77 @@ test "evaluate_identifiers" {
     try run_vm_tests(&tests, false);
 }
 
+test "evaluate_function_expressions" {
+    const tests = [_]VMTestCase{
+        .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
+        .{ .source = "fn() { 5 + 10 }()", .expected = "15" },
+        .{ .source = "var a = fn() { return 5 + 10 }; a()", .expected = "15" },
+        .{ .source = "var a = fn() {}; a()", .expected = "null" },
+        .{ .source = "var a = fn() {}; var b = fn() { a() }; b()", .expected = "null" },
+        .{ .source = "var a = fn() {}; var b = fn() { a }; b()()", .expected = "null" },
+        .{ .source = "const a = fn() { return fn() { 5 + 10} }; a()()", .expected = "15" },
+        .{
+            .source =
+            \\  const a = fn() {1};
+            \\  const b = fn() { a() + 1 };
+            \\  const c = fn() { b() + 1 };
+            \\  c()
+            ,
+            .expected = "3",
+        },
+        .{
+            .source =
+            \\  const a = fn() {1};
+            \\  const b = fn() { a() + 1 };
+            \\  const c = fn() { return b() + 1; return b() + 2; };
+            \\  c()
+            ,
+            .expected = "3",
+        },
+        // .{ .source = "fn(x, y) { x + y}(1, 2)", .expected = "3" },
+        // .{ .source = "const a = fn(x, y) { x + y }; a(2, 4);", .expected = "6" },
+        // .{ .source = "const call_fn = fn(x, y) { x(y) }; call_fn(fn(x) { return 2 * x; }, 4);", .expected = "8" },
+        // .{
+        //     .source = "const fn_call = fn(x) { const b = fn(y) { x + y}; return b; }; const a = fn_call(2); a(3)",
+        //     .expected = "5",
+        // },
+        // .{
+        //     .source =
+        //     \\  const fn_call = fn(x) {
+        //     \\      const b = fn(y) {
+        //     \\          x + y
+        //     \\      };
+        //     \\      return b;
+        //     \\  };
+        //     \\  const a = fn_call(2);
+        //     \\  const b = fn_call(3);
+        //     \\  a(3);
+        //     \\  b(7);
+        //     ,
+        //     .expected = "10",
+        // },
+        // .{
+        //     .source =
+        //     \\  const a = 10;
+        //     \\  const fn_call = fn(x) {
+        //     \\      const b = fn(y) {
+        //     \\          a + x + y
+        //     \\      };
+        //     \\      return b;
+        //     \\  };
+        //     \\  const add_two = fn_call(2);
+        //     \\  const add_three = fn_call(3);
+        //     \\  add_three(3);
+        //     \\  add_three(7);
+        //     ,
+        //     .expected = "20",
+        // },
+        // .{ .source = "const add = fn(x, y) { return x + y; }; add( 5 * 5, add(5, 5))", .expected = "35" },
+        // .{ .source = "const b = fn() { 10; }; const add = fn(a, b) { a() + b }; add(b, 10);", .expected = "20" },
+    };
+
+    try run_vm_tests(&tests, false);
+}
 fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {
@@ -729,6 +838,9 @@ fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
             const out = try Code.code_to_str(testing.allocator, vm.memory.instructions.items);
             defer testing.allocator.free(out);
             std.debug.print("Instructions:\n{s}\n", .{out});
+            const out2 = try Code.code_to_str(testing.allocator, vm.memory.function_storage.items);
+            defer testing.allocator.free(out2);
+            std.debug.print("Functions:\n{s}\n", .{out2});
         }
         try vm.run();
 

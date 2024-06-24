@@ -5,11 +5,12 @@ free_list: std.ArrayListUnmanaged(MemoryAddress),
 stack_ptr: u32,
 reserved_memory: u32,
 
-stack_frames: std.ArrayListUnmanaged(StackFrame),
-unused_frames: std.ArrayListUnmanaged(FrameIndex),
+stack_frames: StackFrame,
 
 instructions: std.ArrayList(u8),
 ins_ptr: u32,
+function_storage: std.ArrayList(u8),
+
 constants: std.ArrayListUnmanaged(MemoryAddress),
 globals: []MemoryAddress,
 
@@ -17,6 +18,7 @@ allocator: Allocator,
 
 pub const ConstantID = u32;
 pub const GlobalID = u32;
+pub const FunctionAddress = u32;
 
 pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
@@ -49,12 +51,12 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
     var pool = Memory{
         .memory = .{},
         .free_list = .{},
-        .stack_frames = .{},
-        .unused_frames = .{},
+        .stack_frames = StackFrame.init(),
         .stack_ptr = 0,
         .allocator = allocator,
         .instructions = try std.ArrayList(u8).initCapacity(allocator, instruction_init_size),
         .ins_ptr = 0,
+        .function_storage = try std.ArrayList(u8).initCapacity(allocator, instruction_init_size),
         .constants = .{},
         .globals = try allocator.alloc(MemoryAddress, globals_limit),
         .reserved_memory = reserved_objects,
@@ -115,11 +117,11 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
 
 pub fn deinit(self: *Memory) void {
     self.stack_frames.deinit(self.allocator);
-    self.unused_frames.deinit(self.allocator);
     self.free_list.deinit(self.allocator);
     self.allocator.free(self.globals);
     self.instructions.deinit();
     self.constants.deinit(self.allocator);
+    self.function_storage.deinit();
 
     for (0..self.memory.len) |i| {
         const memory_slice = self.memory.slice();
@@ -193,11 +195,10 @@ pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const
             memory_dtype[location] = .return_expression;
             memory_data[location].return_value = value.*;
         },
-        .function_expression => {
-            const value: *const MemoryObject.FunctionExpression = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .function_expression;
-            // memory_data[location].function.instruction_ptr = value.instruction_ptr;
-            memory_data[location].function.env = value.env;
+        .compiled_function => {
+            const value: *const MemoryObject.FunctionData = @ptrCast(@alignCast(data));
+            memory_dtype[location] = .compiled_function;
+            memory_data[location].function = value.*;
         },
         .runtime_error => {
             const value: *const MemoryObject.StringType = @ptrCast(@alignCast(data));
@@ -282,7 +283,11 @@ pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
             }
             return map;
         },
-        .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => return addr,
+        .compiled_function => {
+            const obj = try self.alloc(.compiled_function, @ptrCast(&data.data.function));
+            return obj;
+        },
+        .return_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => return addr,
         .runtime_error => unreachable,
     }
 }
@@ -320,7 +325,7 @@ pub fn dupe_onto_stack(self: *Memory, addr: MemoryAddress) !void {
                 self.increase_ref(new_key);
             }
         },
-        .return_expression, .function_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => {
+        .return_expression, .compiled_function, .null, .boolean, .break_statement, .continue_statement, .builtin => {
             try self.stack_push(data);
         },
         .runtime_error => unreachable,
@@ -356,7 +361,7 @@ fn destroy(self: *Memory, ptr: MemoryAddress) void {
     switch (tag) {
         .integer => {},
         .return_expression => {},
-        .function_expression => {},
+        .compiled_function => {},
         .runtime_error => {
             self.allocator.free(
                 memory_data[ptr].runtime_error.ptr[0..memory_data[ptr].runtime_error.len],
@@ -395,6 +400,16 @@ fn destroy(self: *Memory, ptr: MemoryAddress) void {
     }
     memory_slice.items(.dtype)[ptr] = .null;
     memory_slice.items(.data)[ptr].integer = 0;
+}
+
+pub fn register_function(self: *Memory, instructions: []const u8) !ConstantID {
+    const function_location = self.function_storage.items.len;
+    try self.function_storage.appendSlice(instructions);
+    const func_data = MemoryObject.FunctionData{
+        .ptr = @intCast(function_location),
+        .len = @intCast(instructions.len),
+    };
+    return self.register_constant(.compiled_function, @ptrCast(&func_data));
 }
 
 pub fn register_constant(self: *Memory, dtype: Types, data: *const anyopaque) !ConstantID {
@@ -665,13 +680,18 @@ pub const MemoryObject = struct {
         integer: i64,
         boolean: bool,
         return_value: MemoryAddress,
-        function: FunctionExpression,
+        function: FunctionData,
         // Passed By reference,
         runtime_error: StringType,
         builtin: BuiltInFn,
         string_type: *std.ArrayListUnmanaged(u8),
         array: *std.ArrayListUnmanaged(MemoryAddress),
         hash_map: HashData,
+    };
+
+    pub const FunctionData = extern struct {
+        ptr: FunctionAddress,
+        len: u32,
     };
 
     pub const HashData = extern struct {
@@ -730,11 +750,6 @@ pub const MemoryObject = struct {
         }
     };
 
-    const FunctionExpression = extern struct {
-        env: StackFrame,
-        // instruction_ptr: u32,
-    };
-
     pub const ArrayType = struct {
         data: []const MemoryAddress,
     };
@@ -759,10 +774,10 @@ pub const Types = enum(u8) {
     string,
     array,
     hash_map,
+    compiled_function,
     return_expression,
     break_statement,
     continue_statement,
-    function_expression,
     runtime_error,
     builtin,
     null,
@@ -822,19 +837,13 @@ pub fn ObjectToString(self: *Memory, obj: MemoryObject, buffer: []u8) ![]const u
             return std.fmt.bufPrint(buffer, "{s}", .{local_array.items});
         },
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
-        .function_expression => return std.fmt.bufPrint(buffer, "Function", .{}),
+        .compiled_function => return std.fmt.bufPrint(buffer, "Function@{d}", .{obj.data.function.ptr}),
         .builtin => unreachable,
         .return_expression => unreachable,
         .break_statement => return std.fmt.bufPrint(buffer, "break", .{}),
         .continue_statement => return std.fmt.bufPrint(buffer, "continue", .{}),
     }
 }
-
-pub const StackFrame = extern struct {
-    frame_len: u32,
-    frame: [*]MemoryObject,
-    // parent: FrameIndex,
-};
 
 test "Memory init" {
     // var timer = try std.time.Timer.start();
@@ -1000,3 +1009,4 @@ test "Memory init" {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const StackFrame = @import("stack_frame.zig");
