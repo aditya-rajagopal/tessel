@@ -5,6 +5,7 @@ allocator: Allocator,
 symbol_table: *SymbolTable,
 scratch_pad: std.ArrayList(u8),
 emit_to_scratch: bool,
+scratch_ptrs: std.ArrayList(usize),
 last_statement: Ast.Node.Tag,
 
 pub const CompilerErrors = error{
@@ -21,6 +22,7 @@ pub fn create(allocator: Allocator, map: *SymbolTable, memory: *Memory) !Compile
         .symbol_table = map,
         .allocator = allocator,
         .scratch_pad = std.ArrayList(u8).init(allocator),
+        .scratch_ptrs = std.ArrayList(usize).init(allocator),
         .emit_to_scratch = false,
         .last_statement = .ROOT,
     };
@@ -41,6 +43,7 @@ pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
 
     try self.compile_program_statements(ast, statements[start..]);
     self.scratch_pad.deinit();
+    self.scratch_ptrs.deinit();
 }
 
 fn compile_program_statements(self: *Compiler, ast: *const Ast, statements: []u32) !void {
@@ -97,10 +100,10 @@ fn compile_statement(
                     try self.emit(.pop, &[_]u32{});
                 }
             } else {
-                const start = self.memory.instructions.items.len;
+                const start = self.get_current_ins_ptr();
                 const obj_start = self.memory.constants.items.len;
                 try self.compile_expression(ast, ast_node.node_data.lhs);
-                const end = self.memory.instructions.items.len;
+                const end = self.get_current_ins_ptr();
                 var i = start;
                 var is_modifying = false;
                 while (i < end) {
@@ -150,20 +153,25 @@ fn compile_statement(
 }
 
 fn compile_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void {
-    const eval_start: u32 = @intCast(self.memory.instructions.items.len);
+    const eval_start: u32 = @intCast(self.get_current_ins_ptr());
     try self.compile_expression(ast, node.node_data.lhs);
-    const jn_pos = self.memory.instructions.items.len;
+
+    const jn_pos = self.get_current_ins_ptr();
     try self.emit(.jn, &[_]u32{9090});
 
     const block_node_tag = ast.nodes.items(.tag)[node.node_data.rhs];
     std.debug.assert(block_node_tag == .BLOCK);
     const block_node_data = ast.nodes.items(.node_data)[node.node_data.rhs];
     const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-    try self.compile_block_statements(ast, .{ .statements = statements, .pop_last = false });
+    try self.compile_block_statements(ast, .{
+        .statements = statements,
+        .pop_last = false,
+        .emit_to_scratch = self.emit_to_scratch,
+    });
 
     try self.emit(.jmp, &[_]u32{eval_start});
 
-    self.overwrite_jmp_pos(jn_pos, self.memory.instructions.items.len);
+    self.overwrite_jmp_pos(jn_pos, self.get_current_ins_ptr());
     try self.emit(.lnull, &[_]u32{});
     try self.emit(.pop, &[_]u32{});
 }
@@ -289,6 +297,7 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     // rhs = <FUNCTION_BLOCK> of type BLOCK
     const state = self.emit_to_scratch;
     const start = self.scratch_pad.items.len;
+    try self.scratch_ptrs.append(start);
 
     const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
     const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
@@ -305,6 +314,7 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     }
     const const_id = try self.memory.register_function(self.scratch_pad.items[start..]);
     self.scratch_pad.shrinkRetainingCapacity(start);
+    _ = self.scratch_ptrs.pop();
     self.emit_to_scratch = state;
     try self.emit(.load_const, &[_]u32{const_id});
 }
@@ -345,7 +355,7 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
     // Emit condition evaluation
     try self.compile_expression(ast, ast_node.node_data.lhs);
 
-    const jn_pos = self.memory.instructions.items.len;
+    const jn_pos = self.get_current_ins_ptr();
     try self.emit(.jn, &[_]u32{9090});
 
     switch (ast_node.tag) {
@@ -354,16 +364,20 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, .{ .statements = statements, .pop_last = false });
+            try self.compile_block_statements(ast, .{
+                .statements = statements,
+                .pop_last = false,
+                .emit_to_scratch = self.emit_to_scratch,
+            });
 
-            const jmp_pos = self.memory.instructions.items.len;
+            const jmp_pos = self.get_current_ins_ptr();
             try self.emit(.jmp, &[_]u32{9090});
 
-            self.overwrite_jmp_pos(jn_pos, self.memory.instructions.items.len);
+            self.overwrite_jmp_pos(jn_pos, self.get_current_ins_ptr());
 
             try self.emit(.lnull, &[_]u32{});
 
-            self.overwrite_jmp_pos(jmp_pos, self.memory.instructions.items.len);
+            self.overwrite_jmp_pos(jmp_pos, self.get_current_ins_ptr());
         },
         .IF_ELSE => {
             const blocks = ast.extra_data[ast_node.node_data.rhs .. ast_node.node_data.rhs + 2];
@@ -372,20 +386,29 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[0]];
             const statements_if = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, .{ .statements = statements_if, .pop_last = false });
+            try self.compile_block_statements(ast, .{
+                .statements = statements_if,
+                .pop_last = false,
+                .emit_to_scratch = self.emit_to_scratch,
+            });
 
-            const jmp_pos = self.memory.instructions.items.len;
+            const jmp_pos = self.get_current_ins_ptr();
             try self.emit(.jmp, &[_]u32{9090});
 
-            self.overwrite_jmp_pos(jn_pos, self.memory.instructions.items.len);
+            self.overwrite_jmp_pos(jn_pos, self.get_current_ins_ptr());
 
             block_node_tag = ast.nodes.items(.tag)[blocks[1]];
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             const statements_else = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-            try self.compile_block_statements(ast, .{ .statements = statements_else, .pop_last = false });
 
-            self.overwrite_jmp_pos(jmp_pos, self.memory.instructions.items.len);
+            try self.compile_block_statements(ast, .{
+                .statements = statements_else,
+                .pop_last = false,
+                .emit_to_scratch = self.emit_to_scratch,
+            });
+
+            self.overwrite_jmp_pos(jmp_pos, self.get_current_ins_ptr());
         },
         inline else => unreachable,
     }
@@ -417,8 +440,15 @@ fn emit_infix_op(self: *Compiler, tag: Ast.Node.Tag) !void {
 
 fn overwrite_jmp_pos(self: *Compiler, jmp_loc: usize, value: usize) void {
     const slice = std.mem.asBytes(&@as(u32, @intCast(value)));
-    for (0..4) |i| {
-        self.memory.instructions.items[jmp_loc + 1 + i] = slice[i];
+    const scratch_ptr = self.scratch_ptrs.getLastOrNull();
+    if (scratch_ptr) |s| {
+        for (0..4) |i| {
+            self.scratch_pad.items[s + jmp_loc + 1 + i] = slice[i];
+        }
+    } else {
+        for (0..4) |i| {
+            self.memory.instructions.items[jmp_loc + 1 + i] = slice[i];
+        }
     }
 }
 
@@ -427,6 +457,15 @@ fn emit(self: *Compiler, op: Code.Opcode, operands: []const u32) !void {
         try Code.make(&self.scratch_pad, op, operands);
     } else {
         try Code.make(&self.memory.instructions, op, operands);
+    }
+}
+
+fn get_current_ins_ptr(self: *Compiler) usize {
+    const scratch_ptr = self.scratch_ptrs.getLastOrNull();
+    if (scratch_ptr) |s| {
+        return self.scratch_pad.items.len - s;
+    } else {
+        return self.memory.instructions.items.len;
     }
 }
 

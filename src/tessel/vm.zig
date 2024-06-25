@@ -176,14 +176,18 @@ pub fn run(self: *VM) !void {
                 self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
                 try self.memory.set_global(gid);
-                // const expr = self.memory.stack_pop();
-                // self.globals[var_self.memory.ins_ptr] = expr;
             },
             .get_global => {
                 const gid = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
                 self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
                 try self.memory.get_global(gid);
+            },
+            .set_local => {
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
+            },
+            .get_local => {
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
             },
         }
         self.memory.stack_frames.inc_current_frame_ins_ptr(1);
@@ -749,10 +753,16 @@ test "evaluate_function_expressions" {
         .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
         .{ .source = "fn() { 5 + 10 }()", .expected = "15" },
         .{ .source = "var a = fn() { return 5 + 10 }; a()", .expected = "15" },
+        .{ .source = "var a = fn() { if ( 1 < 5) { return 5 } else { return 1 } }; a()", .expected = "5" },
+        .{ .source = "var a = fn() { if ( 1 > 5) { return 5 } }; a()", .expected = "null" },
         .{ .source = "var a = fn() {}; a()", .expected = "null" },
         .{ .source = "var a = fn() {}; var b = fn() { a() }; b()", .expected = "null" },
         .{ .source = "var a = fn() {}; var b = fn() { a }; b()()", .expected = "null" },
         .{ .source = "const a = fn() { return fn() { 5 + 10} }; a()()", .expected = "15" },
+        .{
+            .source = "const a = fn() { return fn() { if (1 < 5) { return 5 } else { return 1}} }; a()()",
+            .expected = "5",
+        },
         .{
             .source =
             \\  const a = fn() {1};
