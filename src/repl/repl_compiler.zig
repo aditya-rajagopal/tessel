@@ -32,8 +32,8 @@ pub fn start() !void {
     try source_buffer.append(0);
     // var start_statement: u32 = 0;
 
-    var identifier_map = IdentifierMap.init();
-    defer identifier_map.deinit(allocator);
+    var symbol_tree = SymbolTree.init(allocator);
+    defer symbol_tree.deinit();
     var vm = try VM.init(allocator, true);
     defer vm.deinit();
 
@@ -62,7 +62,7 @@ pub fn start() !void {
             try bw.flush();
             try stdout.print("\n", .{});
             try bw.flush();
-            var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &identifier_map);
+            var ast = try Parser.parse_program(source_buffer.items[0 .. source_buffer.items.len - 1 :0], allocator, &symbol_tree);
             defer ast.deinit(allocator);
 
             if (ast.errors.len > 0) {
@@ -73,7 +73,7 @@ pub fn start() !void {
 
             ast.print_to_stderr();
 
-            var compiler = try Compiler.create(allocator, &identifier_map, &vm.memory);
+            var compiler = try Compiler.create(allocator, &vm.memory);
 
             try compiler.compile(&ast, 0);
 
@@ -118,3 +118,4 @@ const Compiler = @import("../tessel/compiler.zig");
 const Code = @import("../tessel/code.zig");
 const VM = @import("../tessel/vm.zig");
 const Memory = @import("../tessel/memory.zig");
+const SymbolTree = @import("../tessel/symbol_tree.zig");

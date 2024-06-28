@@ -6,20 +6,21 @@ current_index: u32,
 pub const SymbolIndex = u32;
 
 pub const Symbol = struct {
-    name: []const u8,
+    // name: []const u8,
     scope: SymbolScope,
     index: SymbolIndex,
     type: Tag,
 
-    pub const Tag = enum {
-        constant,
-        variable,
+    pub const Tag = enum(u1) {
+        constant = 0,
+        variable = 1,
     };
 };
 
-pub const SymbolScope = enum {
-    global,
-    block,
+pub const SymbolScope = enum(u2) {
+    global = 0,
+    block = 1,
+    local = 2,
 };
 
 pub const SymbolError = error{ IdentifierRedecleration, UnkownIdentifier };
@@ -54,7 +55,7 @@ pub fn define(
         try local_key.appendSlice(key);
         const local_key_str = try local_key.toOwnedSlice();
         const data = Symbol{
-            .name = local_key_str,
+            // .name = local_key_str,
             .index = self.current_index,
             .scope = scope,
             .type = tag,
@@ -65,11 +66,11 @@ pub fn define(
     }
 }
 
-pub fn resolve(self: *SymbolTable, key: []const u8) !Symbol {
+pub fn resolve(self: *SymbolTable, key: []const u8) SymbolError!Symbol {
     return self.map.get(key) orelse return Error.UnkownIdentifier;
 }
 
-pub fn resolvePtr(self: *SymbolTable, key: []const u8) !*Symbol {
+pub fn resolvePtr(self: *SymbolTable, key: []const u8) SymbolError!*Symbol {
     return self.map.getPtr(key) orelse return Error.UnkownIdentifier;
 }
 
@@ -79,10 +80,10 @@ pub fn print_env_hashmap_stderr(self: *SymbolTable) void {
     std.debug.print("Environment Hash map: \n", .{});
     while (it.next()) |value_ptr| {
         std.debug.print(
-            "\tKey: \"{s}\"\t Value: name: {s}\tscope:{s}\tindex: {d}\n",
+            "\tKey: \"{s}\"\t Value: \tscope:{s}\tindex: {d}\n",
             .{
                 value_ptr.key_ptr.*,
-                value_ptr.value_ptr.name,
+                // value_ptr.value_ptr.name,
                 @tagName(value_ptr.value_ptr.scope),
                 value_ptr.value_ptr.index,
             },

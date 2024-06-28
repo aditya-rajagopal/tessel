@@ -1,3 +1,4 @@
+// TODO: CHange to symbol tree breaks evaluator fix it.
 pub const Evaluator = @This();
 
 object_pool: ObjectPool,
@@ -5,15 +6,18 @@ environment_pool: EnvironmentPool,
 
 pub const Error = error{ReferencingNodeZero} || ObjectPool.Error;
 
-pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *SymbolTable) !Evaluator {
+pub fn init(allocator: Allocator, env: EnvironmentIndex, map: *SymbolTree) !Evaluator {
     var eval = Evaluator{
         .object_pool = try ObjectPool.init(allocator),
         .environment_pool = try EnvironmentPool.init(allocator),
     };
+    if (map.tree.items.len == 0) {
+        _ = try map.create_table(null);
+    }
 
     inline for (std.meta.fields(Builtins)) |f| {
         const position = try eval.object_pool.create(allocator, .builtin, @ptrCast(&@field(Builtins.default, f.name)));
-        const hash = try map.define(allocator, f.name, .constant, .global);
+        const hash = try map.define(0, f.name, .constant);
         try eval.environment_pool.create_variable(env, allocator, hash.index, position, .constant);
     }
     return eval;
@@ -1544,7 +1548,7 @@ test "evaluate_string_expressions" {
         .{ .source = "\"foobar\"[-1]", .output = "r" },
     };
 
-    try eval_tests(&tests, false);
+    try eval_tests(&tests, true);
 }
 
 test "evaluate_builtin_len" {
@@ -1751,15 +1755,15 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         if (enable_debug_print) {
             std.debug.print("Testing: Source: {s}\n", .{t.source});
         }
-        var identifier_map = SymbolTable.init();
-        defer identifier_map.deinit(testing.allocator);
         // var env = try Environment.Create(testing.allocator);
-        var eval = try Evaluator.init(testing.allocator, global_env, &identifier_map);
+        var symbol_tree = SymbolTree.init(testing.allocator);
+        defer symbol_tree.deinit();
+        var eval = try Evaluator.init(testing.allocator, global_env, &symbol_tree);
         defer {
             // env.deinit(testing.allocator, &eval.object_pool);
             eval.deinit(testing.allocator);
         }
-        var ast = try Parser.parse_program(t.source, testing.allocator, &identifier_map);
+        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_tree);
         defer ast.deinit(testing.allocator);
 
         const output = try eval.evaluate_program(&ast, 0, testing.allocator, global_env);
@@ -1767,7 +1771,7 @@ fn eval_tests(tests: []const test_struct, enable_debug_print: bool) !void {
         if (enable_debug_print) {
             std.debug.print("Expected: {s} \t Got: {s}\n", .{ t.output, outstr });
             try Parser.print_parser_errors_to_stderr(&ast);
-            identifier_map.print_env_hashmap_stderr();
+            // identifier_map.print_env_hashmap_stderr();
             eval.environment_pool.print_to_stderr();
             try eval.object_pool.print_object_pool_to_stderr();
             for (0..ast.nodes.len) |i| {
@@ -1808,3 +1812,4 @@ const Builtins = @import("builtins.zig");
 const EnvironmentPool = @import("environment_pool.zig");
 const EnvironmentIndex = EnvironmentPool.EnvironmentIndex;
 const global_env = EnvironmentPool.global_env;
+const SymbolTree = @import("symbol_tree.zig");

@@ -77,12 +77,12 @@ pub fn main() !void {
             var len: usize = 0;
             var timer = try std.time.Timer.start();
             {
-                var symbol_table = IdentifierMap.init();
-                defer symbol_table.deinit(allocator);
+                var symbol_tree = SymbolTree.init(allocator);
+                defer symbol_tree.deinit();
                 var vm = try VM.init(allocator, false);
                 defer vm.deinit();
 
-                var ast = try Parser.parse_program(tessel_fibonacci_35_loop, allocator, &symbol_table);
+                var ast = try Parser.parse_program(tessel_fibonacci_35_loop, allocator, &symbol_tree);
                 defer ast.deinit(allocator);
 
                 if (ast.errors.len > 0) {
@@ -90,7 +90,7 @@ pub fn main() !void {
                     return;
                 }
 
-                var compiler = try Compiler.create(allocator, &symbol_table, &vm.memory);
+                var compiler = try Compiler.create(allocator, &vm.memory);
                 try compiler.compile(&ast, 0);
 
                 try vm.run();
@@ -111,14 +111,14 @@ pub fn main() !void {
     var len: usize = 0;
     var timer = try std.time.Timer.start();
     {
-        var identifier_map = IdentifierMap.init();
-        defer identifier_map.deinit(allocator);
-        var eval = try Evaluator.init(allocator, global_env, &identifier_map);
+        var symbol_tree = SymbolTree.init(allocator);
+        defer symbol_tree.deinit();
+        var eval = try Evaluator.init(allocator, global_env, &symbol_tree);
         std.debug.print("Env Pool Max Capacity start {d}\n", .{eval.environment_pool.environment_pool.len});
         std.debug.print("Object Pool Capacity start {d}\n", .{eval.object_pool.object_pool.capacity});
         // eval.environment_pool.print_to_stderr();
         // try eval.object_pool.print_object_pool_to_stderr();
-        var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &identifier_map);
+        var ast = try Parser.parse_program(tessel_fibonacci_35, allocator, &symbol_tree);
         defer ast.deinit(allocator);
 
         try Parser.print_parser_errors_to_stderr(&ast);
@@ -149,3 +149,4 @@ const Compiler = @import("tessel/compiler.zig");
 const ByteCode = @import("tessel/byte_code.zig");
 const VM = @import("tessel/vm.zig");
 const Memory = @import("tessel/memory.zig");
+const SymbolTree = @import("tessel/symbol_tree.zig");

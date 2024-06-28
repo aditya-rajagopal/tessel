@@ -33,12 +33,11 @@ pub fn main() !void {
     buffer[out] = 0;
     var timer = try std.time.Timer.start();
 
-    var identifier_map = IdentifierMap.init();
-    defer identifier_map.deinit(allocator);
+    var symbol_tree = SymbolTree.init(allocator);
+    defer symbol_tree.deinit();
+    var eval = try Evaluator.init(allocator, global_env, &symbol_tree);
 
-    var eval = try Evaluator.init(allocator, global_env, &identifier_map);
-
-    var ast = try Parser.parse_program(buffer[0..out :0], allocator, &identifier_map);
+    var ast = try Parser.parse_program(buffer[0..out :0], allocator, &symbol_tree);
     defer ast.deinit(allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -60,3 +59,4 @@ const Environment = @import("tessel/environment.zig");
 const IdentifierMap = @import("tessel/symbol_table.zig");
 const EnvironmentPool = @import("tessel/environment_pool.zig");
 const global_env = @import("tessel/environment_pool.zig").global_env;
+const SymbolTree = @import("tessel/symbol_tree.zig");

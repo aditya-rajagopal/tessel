@@ -490,14 +490,14 @@ fn eval_eq(self: *VM, op: Code.Opcode) !void {
 test "vm_init" {
     const source: [:0]const u8 = "1 + 2";
 
-    var symbol_table = SymbolTable.init();
-    defer symbol_table.deinit(testing.allocator);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
     var vm = try VM.init(testing.allocator, true);
     defer vm.deinit();
 
-    var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
+    var compiler = try Compiler.create(testing.allocator, &vm.memory);
 
-    var ast = try Parser.parse_program(source, testing.allocator, &symbol_table);
+    var ast = try Parser.parse_program(source, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     try compiler.compile(&ast, 0);
@@ -831,17 +831,19 @@ fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
         if (debug_print) {
             std.debug.print("Source: {s}\n", .{t.source});
         }
-        var symbol_table = SymbolTable.init();
-        defer symbol_table.deinit(testing.allocator);
+
+        var symbol_tree = SymbolTree.init(testing.allocator);
+        defer symbol_tree.deinit();
+
         var vm = try VM.init(testing.allocator, false);
         defer vm.deinit();
 
-        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
+        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_tree);
         defer ast.deinit(testing.allocator);
         if (debug_print) {
             ast.print_to_stderr();
         }
-        var compiler = try Compiler.create(testing.allocator, &symbol_table, &vm.memory);
+        var compiler = try Compiler.create(testing.allocator, &vm.memory);
         try compiler.compile(&ast, 0);
 
         if (debug_print) {
@@ -878,3 +880,4 @@ const SymbolTable = @import("symbol_table.zig");
 // const ByteCode = @import("self.memory.zig");
 const Compiler = @import("compiler.zig");
 const Memory = @import("memory.zig");
+const SymbolTree = @import("symbol_tree.zig");

@@ -4,7 +4,7 @@ pub const Parser = @This();
 source_buffer: [:0]const u8,
 /// The allocator to be used in all internal allocations
 allocator: std.mem.Allocator,
-map: *SymbolTable,
+tree: *SymbolTree,
 /// List of token types for each array. Seperated here for ease of access
 /// so that we dont have to get a Token struct out of a multiArray every time
 token_tags: []const token.TokenType,
@@ -38,13 +38,14 @@ errors: std.ArrayListUnmanaged(Ast.Error),
 /// a bit more space in the AST by converting integer literals as they are parsed and pointing to a location
 /// in this array. This results in at worst the same number of string to int calls.
 integer_literal_program_memory: std.ArrayListUnmanaged(i64),
+scope_stack: std.ArrayListUnmanaged(SymbolTree.SymbolIndex),
 
 /// Since the root node does not have any data and is always at 0 we can use 0 as a null value
 pub const null_node: Ast.Node.NodeIndex = 0;
 
 pub const Error = error{ParsingError} || Allocator.Error;
 
-pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, map: *SymbolTable) !Ast {
+pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, tree: *SymbolTree) !Ast {
     std.debug.assert(source_buffer.len > 0);
 
     var tokens_local = Ast.TokenArrayType{};
@@ -60,10 +61,14 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, 
         if (tok.type == .EOF) break;
     }
 
+    if (tree.tree.items.len == 0) {
+        _ = try tree.create_table(null);
+    }
+
     var parser = Parser{
         .source_buffer = source_buffer, //
         .allocator = allocator,
-        .map = map,
+        .tree = tree,
         .token_tags = tokens_local.items(.tag),
         .token_starts = tokens_local.items(.start),
         .token_ends = tokens_local.items(.end),
@@ -73,8 +78,10 @@ pub fn parse_program(source_buffer: [:0]const u8, allocator: std.mem.Allocator, 
         .extra_data = .{},
         .scratch_pad = .{},
         .integer_literal_program_memory = .{},
+        .scope_stack = .{},
     };
     defer parser.deinit(allocator);
+    try parser.scope_stack.append(allocator, 0);
 
     const estimated_nodes = tokens_local.len / 2 + 2;
     try parser.nodes.ensureTotalCapacity(allocator, estimated_nodes);
@@ -97,6 +104,7 @@ pub fn deinit(self: *Parser, allocator: Allocator) void {
     self.extra_data.deinit(allocator);
     self.scratch_pad.deinit(allocator);
     self.integer_literal_program_memory.deinit(allocator);
+    self.scope_stack.deinit(allocator);
 }
 
 pub fn begin_parsing(self: *Parser) !void {
@@ -237,8 +245,9 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
             .rhs = 0,
         },
     });
-    const hash = self.map.resolve(self.get_token_literal(ident_token)) catch |err| switch (err) {
-        SymbolTable.Error.UnkownIdentifier => {
+    const scope = self.scope_stack.getLast();
+    const hash = self.tree.resolve(scope, self.get_token_literal(ident_token)) catch |err| switch (err) {
+        SymbolTable.SymbolError.UnkownIdentifier => {
             try self.add_error(.{
                 .tag = .unkown_variable, //
                 .token = ident_token,
@@ -247,9 +256,10 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
             _ = self.eat_token_till(.SEMICOLON);
             return Error.ParsingError;
         },
-        SymbolTable.Error.IdentifierRedecleration => unreachable,
+        SymbolTable.SymbolError.IdentifierRedecleration => unreachable,
         else => |overflow| return overflow,
     };
+
     if (hash.type == .constant) {
         try self.add_error(.{
             .tag = .reassigning_const, //
@@ -262,11 +272,9 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     const ident_node = try self.add_node(.{
         .tag = .IDENTIFIER,
         .main_token = ident_token,
-        .node_data = .{
-            .lhs = hash.index,
-            .rhs = @as(u32, @intFromEnum(hash.type)),
-        },
+        .node_data = SymbolTree.symbol_to_identifier(hash),
     });
+
     const expression = try self.parse_expect_expression();
     self.nodes.items(.node_data)[assign_node].lhs = ident_node;
     self.nodes.items(.node_data)[assign_node].rhs = expression;
@@ -275,6 +283,7 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
 }
 
 fn parse_var_decl(self: *Parser, scope: SymbolTable.SymbolScope) Error!Ast.Node.NodeIndex {
+    _ = scope;
     const var_str = self.get_token_literal(self.token_current);
     const node = try self.add_node(.{
         .tag = Ast.Node.Tag.VAR_STATEMENT, //
@@ -289,36 +298,20 @@ fn parse_var_decl(self: *Parser, scope: SymbolTable.SymbolScope) Error!Ast.Node.
 
     // After a const or var statement you expect a identifier
     if (self.is_current_token(.IDENT)) {
-        const hash = self.map.define(
-            self.allocator,
+        const current_scope = self.scope_stack.getLast();
+        const hash_node = self.tree.define_node_data(
+            current_scope,
             self.get_token_literal(self.token_current),
             var_tag,
-            scope,
         ) catch |err| switch (err) {
-            SymbolTable.Error.IdentifierRedecleration => esc: {
-                if (scope == .global) {
-                    const hash = self.map.resolve(self.get_token_literal(self.token_current)) catch |err2| switch (err2) {
-                        SymbolTable.Error.UnkownIdentifier => unreachable,
-                        SymbolTable.Error.IdentifierRedecleration => unreachable,
-                        else => |overflow| return overflow,
-                    };
-                    if (hash.scope == .global) {
-                        try self.add_error(.{
-                            .tag = .variable_redecleration, //
-                            .token = self.token_current,
-                            .expected = .IDENT,
-                        });
-                        _ = self.eat_token_till(.SEMICOLON);
-                        return Error.ParsingError;
-                    }
-                    break :esc hash;
-                } else {
-                    break :esc self.map.resolve(self.get_token_literal(self.token_current)) catch |err2| switch (err2) {
-                        SymbolTable.Error.UnkownIdentifier => unreachable,
-                        SymbolTable.Error.IdentifierRedecleration => unreachable,
-                        else => |overflow| return overflow,
-                    };
-                }
+            SymbolTable.Error.IdentifierRedecleration => {
+                try self.add_error(.{
+                    .tag = .variable_redecleration, //
+                    .token = self.token_current,
+                    .expected = .IDENT,
+                });
+                _ = self.eat_token_till(.SEMICOLON);
+                return Error.ParsingError;
             },
             SymbolTable.Error.UnkownIdentifier => unreachable,
             else => |overflow| return overflow,
@@ -327,10 +320,7 @@ fn parse_var_decl(self: *Parser, scope: SymbolTable.SymbolScope) Error!Ast.Node.
         const ident = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = self.next_token(),
-            .node_data = .{
-                .lhs = hash.index, //
-                .rhs = @as(u32, @intFromEnum(hash.type)),
-            },
+            .node_data = hash_node,
         });
         self.nodes.items(.node_data)[node].lhs = ident;
     } else {
@@ -534,8 +524,9 @@ fn parse_expect_prefix_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
     switch (self.token_tags[self.token_current]) {
         .IDENT => {
-            const hash = self.map.resolve(self.get_token_literal(self.token_current)) catch |err| switch (err) {
-                SymbolTable.Error.UnkownIdentifier => {
+            const scope = self.scope_stack.getLast();
+            const hash = self.tree.resolve_node_data(scope, self.get_token_literal(self.token_current)) catch |err| switch (err) {
+                SymbolTable.SymbolError.UnkownIdentifier => {
                     try self.add_error(.{
                         .tag = .unkown_variable, //
                         .token = self.token_current,
@@ -544,16 +535,12 @@ fn parse_other_expressions(self: *Parser) Error!Ast.Node.NodeIndex {
                     _ = self.eat_token_till(.SEMICOLON);
                     return Error.ParsingError;
                 },
-                SymbolTable.Error.IdentifierRedecleration => unreachable,
-                else => |overflow| return overflow,
+                SymbolTable.SymbolError.IdentifierRedecleration => unreachable,
             };
             return self.add_node(.{
                 .tag = .IDENTIFIER, //
                 .main_token = self.next_token(),
-                .node_data = .{
-                    .lhs = hash.index,
-                    .rhs = @as(u32, @intFromEnum(hash.type)),
-                },
+                .node_data = hash,
             });
         },
         .INT => {
@@ -745,6 +732,12 @@ fn parse_array_literal(self: *Parser) Error!Ast.Node.NodeIndex {
 
 fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     std.debug.assert(self.is_current_token(.FUNCTION));
+    const current_scope = self.scope_stack.getLast();
+    const new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
+        SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
+        else => |overflow| return overflow,
+    };
+    try self.scope_stack.append(self.allocator, new_scope);
     const func_token = self.next_token();
     _ = try self.expect_token(.LPAREN);
 
@@ -753,6 +746,7 @@ fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
 
     const func_block = try self.parse_block(false);
 
+    _ = self.scope_stack.pop();
     return self.add_node(.{
         .tag = .FUNCTION_EXPRESSION, //
         .main_token = func_token,
@@ -770,14 +764,17 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
     }
     const start_pos = @as(u32, @intCast(self.nodes.len));
     while (true) {
+        const current_scope = self.scope_stack.getLast();
         const next_tok = try self.expect_token(.IDENT);
-        const hash = self.map.define(self.allocator, self.get_token_literal(next_tok), .constant, .block) catch |err| switch (err) {
-            SymbolTable.Error.IdentifierRedecleration => esc: {
-                break :esc self.map.resolve(self.get_token_literal(next_tok)) catch |err2| switch (err2) {
-                    SymbolTable.Error.UnkownIdentifier => unreachable,
-                    SymbolTable.Error.IdentifierRedecleration => unreachable,
-                    else => |overflow| return overflow,
-                };
+        const hash = self.tree.define_node_data(current_scope, self.get_token_literal(next_tok), .constant) catch |err| switch (err) {
+            SymbolTable.Error.IdentifierRedecleration => {
+                try self.add_error(.{
+                    .tag = .variable_redecleration, //
+                    .token = self.token_current,
+                    .expected = .IDENT,
+                });
+                _ = self.eat_token_till(.SEMICOLON);
+                return Error.ParsingError;
             },
             SymbolTable.Error.UnkownIdentifier => unreachable,
             else => |overflow| return overflow,
@@ -785,10 +782,7 @@ fn parse_function_parameters(self: *Parser, func_token: Ast.TokenArrayIndex) Err
         _ = try self.add_node(.{
             .tag = .IDENTIFIER, //
             .main_token = next_tok,
-            .node_data = .{
-                .lhs = hash.index, //
-                .rhs = @as(u32, @intFromEnum(hash.type)),
-            },
+            .node_data = hash,
         });
         if (self.is_current_token(.RPAREN)) break;
         _ = try self.expect_token(.COMMA);
@@ -850,6 +844,13 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
     const scratch_top = self.scratch_pad.items.len;
     defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
 
+    const current_scope = self.scope_stack.getLast();
+    const new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
+        SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
+        else => |overflow| return overflow,
+    };
+    try self.scope_stack.append(self.allocator, new_scope);
+
     // We will keep looping through statements till we encounter a closing brace
     while (true) {
         if (self.is_current_token(.RBRACE)) {
@@ -863,7 +864,7 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
             });
             return Error.ParsingError;
         }
-        const statement = try self.parse_statement(.block);
+        const statement = try self.parse_statement(.local);
         if (statement == 0) {
             break;
         }
@@ -871,6 +872,7 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
     }
     _ = try self.expect_token(.RBRACE);
     const extra_data_loc = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
+    _ = self.scope_stack.pop();
     return self.add_node(.{
         .tag = .BLOCK, //
         .main_token = left_brace,
@@ -1115,9 +1117,9 @@ pub fn print_parser_errors_to_stderr(ast: *const Ast) !void {
 test "parser_initialization_test_only_root_node" {
     const input = "\n";
 
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     try testing.expectEqual(ast.nodes.len, 1);
@@ -1132,9 +1134,9 @@ test "parser_test_var_decl" {
         \\ const c = false;
     ;
 
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1218,9 +1220,9 @@ test "parse_test_var_decl_errors" {
         \\ const b = ;
     ;
 
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
     try testing.expectEqual(ast.errors.len, 3);
 
@@ -1270,9 +1272,9 @@ test "parser_test_return_stmt" {
         \\ return a;
     ;
 
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1355,9 +1357,9 @@ test "parser_test_assignement_stmt" {
         \\ b = fn(c) { c }
     ;
 
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1382,7 +1384,7 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 1,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 1,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1400,13 +1402,13 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 5,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 1,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 9,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
@@ -1423,8 +1425,8 @@ test "parser_test_assignement_stmt" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 12,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .BLOCK, //
@@ -1448,9 +1450,9 @@ test "parser_test_assignement_stmt" {
 
 test "parser_test_identifer" {
     const input = "const foobar = 10; foobar;";
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1505,9 +1507,9 @@ test "parser_test_identifer" {
 
 test "parser_test_int_literal" {
     const input = "15;";
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
 
     defer ast.deinit(testing.allocator);
 
@@ -1548,9 +1550,9 @@ test "parser_test_prefix_operators" {
         \\!15;
         \\-25;
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -1738,9 +1740,9 @@ test "parser_test_if_else_block" {
         \\      var b = 15;
         \\ };
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -1795,8 +1797,8 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 6,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1819,8 +1821,8 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 19,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 6,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1854,9 +1856,9 @@ test "parser_test_naked_if" {
         \\      var b = 10;
         \\ };
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     try Parser.print_parser_errors_to_stderr(&ast);
@@ -1911,8 +1913,8 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 1,
+            .expectedDataLHS = 0,
+            .expectedDataRHS = 6,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1946,9 +1948,9 @@ test "parser_array_expression" {
         \\const three = 3;
         \\[1 , "two", three][1 * 2]
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -2050,9 +2052,9 @@ test "parser_test_function_expression" {
         \\    return a + b;
         \\ }
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -2077,13 +2079,13 @@ test "parser_test_function_expression" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 2,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 4,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
@@ -2101,13 +2103,13 @@ test "parser_test_function_expression" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 8,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 10,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 0,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .ADDITION, //
@@ -2142,9 +2144,9 @@ test "parser_test_function_empty_param" {
         \\    return 10;
         \\ }
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -2204,9 +2206,10 @@ test "parser_test_function_call_expr" {
         \\ const b = 20;
         \\ a(1, 2, b(3, 4));
     ;
-    var identifier_map = SymbolTable.init();
-    defer identifier_map.deinit(testing.allocator);
-    var ast = try Parser.parse_program(input, testing.allocator, &identifier_map);
+
+    var symbol_tree = SymbolTree.init(testing.allocator);
+    defer symbol_tree.deinit();
+    var ast = try Parser.parse_program(input, testing.allocator, &symbol_tree);
     defer ast.deinit(testing.allocator);
 
     const tests = [_]struct {
@@ -2363,3 +2366,4 @@ const token = @import("token.zig");
 const Allocator = std.mem.Allocator;
 const convert_ast_to_string = @import("evaluator.zig").convert_ast_to_string;
 const SymbolTable = @import("symbol_table.zig");
+const SymbolTree = @import("symbol_tree.zig");

@@ -2,7 +2,6 @@ pub const Compiler = @This();
 
 memory: *Memory,
 allocator: Allocator,
-symbol_table: *SymbolTable,
 scratch_pad: std.ArrayList(u8),
 emit_to_scratch: bool,
 scratch_ptrs: std.ArrayList(usize),
@@ -16,10 +15,9 @@ pub const CompilerErrors = error{
 };
 const Error = CompilerErrors || Allocator.Error;
 
-pub fn create(allocator: Allocator, map: *SymbolTable, memory: *Memory) !Compiler {
+pub fn create(allocator: Allocator, memory: *Memory) !Compiler {
     const comp = Compiler{
         .memory = memory,
-        .symbol_table = map,
         .allocator = allocator,
         .scratch_pad = std.ArrayList(u8).init(allocator),
         .scratch_ptrs = std.ArrayList(usize).init(allocator),
@@ -108,7 +106,7 @@ fn compile_statement(
                 var is_modifying = false;
                 while (i < end) {
                     const op: Code.Opcode = @enumFromInt(self.memory.instructions.items[i]);
-                    if (op == .set_global) {
+                    if (op == .set_global or op == .set_local) {
                         is_modifying = true;
                         break;
                     }
@@ -130,15 +128,30 @@ fn compile_statement(
         .VAR_STATEMENT => {
             try self.compile_expression(ast, ast_node.node_data.rhs);
             const ident = ast.nodes.get(ast_node.node_data.lhs);
-            try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
+            const symbol = SymbolTree.identifier_to_symbol(ident.node_data);
+            var op: Code.Opcode = undefined;
+            if (symbol.scope == .local) {
+                op = .set_local;
+            } else {
+                op = .set_global;
+            }
+            try self.emit(op, &[_]u32{ident.node_data.lhs});
         },
         .ASSIGNMENT_STATEMENT => {
             try self.compile_expression(ast, ast_node.node_data.rhs);
             const ident = ast.nodes.get(ast_node.node_data.lhs);
-            if (ident.node_data.rhs == 0) {
+            const symbol = SymbolTree.identifier_to_symbol(ident.node_data);
+            if (symbol.type == .constant) {
                 return Error.AssigningToConst;
             }
-            try self.emit(.set_global, &[_]u32{ident.node_data.lhs});
+            var op: Code.Opcode = undefined;
+
+            if (symbol.scope == .local) {
+                op = .set_local;
+            } else {
+                op = .set_global;
+            }
+            try self.emit(op, &[_]u32{symbol.index});
         },
         .WHILE_LOOP => {
             try self.compile_while_loop(ast, ast_node);
@@ -226,7 +239,14 @@ fn compile_expression(self: *Compiler, ast: *const Ast, node: Ast.Node.NodeIndex
             try self.emit_hash_literal(ast, ast_node);
         },
         .IDENTIFIER => {
-            try self.emit(.get_global, &[_]u32{ast_node.node_data.lhs});
+            const symbol = SymbolTree.identifier_to_symbol(ast_node.node_data);
+            var op: Code.Opcode = undefined;
+            if (symbol.scope == .local) {
+                op = .get_local;
+            } else {
+                op = .get_global;
+            }
+            try self.emit(op, &[_]u32{ast_node.node_data.lhs});
         },
         .BOOLEAN_LITERAL => {
             if (ast_node.node_data.lhs == 1) {
@@ -738,12 +758,12 @@ test "compile function calls" {
 fn test_compiler(tests: []const CompilerTest) !void {
     for (tests) |t| {
         // std.debug.print("{s}\n", .{t.source});
-        var symbol_table = SymbolTable.init();
-        defer symbol_table.deinit(testing.allocator);
+        var symbol_tree = SymbolTree.init(testing.allocator);
+        defer symbol_tree.deinit();
         var memory = try Memory.initCapacity(testing.allocator, 2048);
         defer memory.deinit();
-        var compiler = try Compiler.create(testing.allocator, &symbol_table, &memory);
-        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_table);
+        var compiler = try Compiler.create(testing.allocator, &memory);
+        var ast = try Parser.parse_program(t.source, testing.allocator, &symbol_tree);
         defer ast.deinit(testing.allocator);
         // ast.print_to_stderr();
         try compiler.compile(&ast, 0);
@@ -799,3 +819,4 @@ const break_object = Memory.break_object;
 const continue_object = Memory.continue_object;
 const Builtins = @import("builtins.zig");
 const Memory = @import("memory.zig");
+const SymbolTree = @import("symbol_tree.zig");

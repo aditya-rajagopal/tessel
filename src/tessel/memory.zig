@@ -1,6 +1,7 @@
 pub const Memory = @This();
 
 memory: std.MultiArrayList(MemoryObject),
+
 free_list: std.ArrayListUnmanaged(MemoryAddress),
 stack_ptr: u32,
 reserved_memory: u32,
