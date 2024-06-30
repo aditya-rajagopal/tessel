@@ -34,7 +34,7 @@ pub fn start() !void {
 
     var symbol_tree = SymbolTree.init(allocator);
     defer symbol_tree.deinit();
-    var vm = try VM.init(allocator, true);
+    var vm = try VM.init(allocator, false);
     defer vm.deinit();
 
     while (true) {
@@ -79,8 +79,13 @@ pub fn start() !void {
 
             const out = try Code.code_to_str(allocator, vm.memory.instructions.items);
             defer allocator.free(out);
+            const out2 = try Code.code_to_str(allocator, vm.memory.function_storage.items);
+            defer allocator.free(out2);
 
-            try stdout.print("{s}\n", .{out});
+            try stdout.print("Instructions:\n", .{});
+            try stdout.print("\t{s}\n", .{out});
+            try stdout.print("Functions:\n", .{});
+            try stdout.print("\t{s}\n", .{out2});
             try bw.flush();
 
             try vm.run();

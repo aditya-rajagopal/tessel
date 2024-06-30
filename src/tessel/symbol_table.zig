@@ -10,6 +10,7 @@ pub const Symbol = struct {
     scope: SymbolScope,
     index: SymbolIndex,
     type: Tag,
+    depth: u16 = 0,
 
     pub const Tag = enum(u1) {
         constant = 0,
@@ -47,7 +48,8 @@ pub fn define(
     key: []const u8,
     tag: Symbol.Tag,
     scope: SymbolScope,
-) !Symbol {
+    depth: u16,
+) (SymbolError || Allocator.Error)!Symbol {
     if (self.map.contains(key)) {
         return Error.IdentifierRedecleration;
     } else {
@@ -59,6 +61,7 @@ pub fn define(
             .index = self.current_index,
             .scope = scope,
             .type = tag,
+            .depth = depth,
         };
         try self.map.put(allocator, local_key_str, data);
         self.current_index += 1;
@@ -74,18 +77,18 @@ pub fn resolvePtr(self: *SymbolTable, key: []const u8) SymbolError!*Symbol {
     return self.map.getPtr(key) orelse return Error.UnkownIdentifier;
 }
 
-pub fn print_env_hashmap_stderr(self: *SymbolTable) void {
+pub fn print_table_to_stderr(self: *SymbolTable) void {
     var it = self.map.iterator();
-    std.debug.print("\n", .{});
-    std.debug.print("Environment Hash map: \n", .{});
+    std.debug.print("\tSymbol Table: \n", .{});
     while (it.next()) |value_ptr| {
         std.debug.print(
-            "\tKey: \"{s}\"\t Value: \tscope:{s}\tindex: {d}\n",
+            "\t\tKey: \"{s}\"\ttype:{s}\tscope:{s}\tindex:{d}\tdepth:{d}\n",
             .{
                 value_ptr.key_ptr.*,
-                // value_ptr.value_ptr.name,
+                @tagName(value_ptr.value_ptr.type),
                 @tagName(value_ptr.value_ptr.scope),
                 value_ptr.value_ptr.index,
+                value_ptr.value_ptr.depth,
             },
         );
     }

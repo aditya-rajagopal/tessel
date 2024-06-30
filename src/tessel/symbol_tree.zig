@@ -6,9 +6,11 @@ allocator: Allocator,
 pub const SymbolTreeError = error{ReinitialisingGlobalTree};
 pub const Error = SymbolTreeError || Allocator.Error || SymbolTable.SymbolError;
 
-pub const SymbolIndex = u32;
+pub const SymbolIndex = u16;
 pub const SymbolNode = struct {
     parent: ?SymbolIndex,
+    depth: u16,
+    num_locals: u32 = 0,
     map: SymbolTable,
 };
 
@@ -27,13 +29,20 @@ pub fn deinit(self: *SymbolTree) void {
     self.tree.deinit();
 }
 
-pub fn create_table(self: *SymbolTree, parent: ?SymbolIndex) (SymbolTreeError || Allocator.Error)!SymbolIndex {
+pub fn get_depth(self: *SymbolTree, location: SymbolIndex) u16 {
+    std.debug.assert(location < self.tree.items.len);
+    return self.tree.items[location].depth;
+}
+
+pub fn create_table(self: *SymbolTree, parent: ?SymbolIndex) Error!SymbolIndex {
     if (parent) |p| {
         std.debug.assert(self.tree.items.len > 0);
-        const pos: u32 = @intCast(self.tree.items.len);
+        const pos: u16 = @intCast(self.tree.items.len);
+        const table = self.tree.items[p];
         try self.tree.append(SymbolNode{
             .parent = p,
             .map = SymbolTable.init(),
+            .depth = table.depth + 1,
         });
         return pos;
     } else {
@@ -43,6 +52,7 @@ pub fn create_table(self: *SymbolTree, parent: ?SymbolIndex) (SymbolTreeError ||
         try self.tree.append(SymbolNode{
             .parent = null,
             .map = SymbolTable.init(),
+            .depth = 0,
         });
         return 0;
     }
@@ -58,7 +68,9 @@ pub fn define(
     const symbol_node = &self.tree.items[location];
 
     const scope: SymbolTable.SymbolScope = if (symbol_node.parent) |_| .local else .global;
-    return symbol_node.map.define(self.allocator, key, tag, scope);
+    const symbol = try symbol_node.map.define(self.allocator, key, tag, scope, symbol_node.depth);
+    self.tree.items[location].num_locals += 1;
+    return symbol;
 }
 
 pub fn define_node_data(
@@ -68,10 +80,7 @@ pub fn define_node_data(
     tag: SymbolTable.Symbol.Tag,
 ) !Ast.Node.NodeData {
     const symbol = try self.define(location, key, tag);
-    return Ast.Node.NodeData{
-        .lhs = symbol.index,
-        .rhs = (@as(u32, @intCast(@intFromEnum(symbol.type))) << 2) | @intFromEnum(symbol.scope),
-    };
+    return symbol_to_identifier(symbol, self.get_depth(location));
 }
 
 pub fn resolve(self: *SymbolTree, location: SymbolIndex, key: []const u8) SymbolTable.SymbolError!SymbolTable.Symbol {
@@ -89,20 +98,20 @@ pub fn resolve(self: *SymbolTree, location: SymbolIndex, key: []const u8) Symbol
     };
 }
 
-pub fn resolvePtr(self: *SymbolTree, location: SymbolIndex, key: []const u8) SymbolTable.SymbolError!*SymbolTable.Symbol {
-    std.debug.assert(location < self.tree.items.len);
-    const symbol_node = &self.tree.items[location];
-    return symbol_node.map.resolvePtr(key) catch |err| switch (err) {
-        SymbolTable.SymbolError.UnkownIdentifier => |e| {
-            if (symbol_node.parent) |p| {
-                return self.resolvePtr(p, key);
-            } else {
-                return e;
-            }
-        },
-        SymbolTable.SymbolError.IdentifierRedecleration => unreachable,
-    };
-}
+// pub fn resolvePtr(self: *SymbolTree, location: SymbolIndex, key: []const u8) SymbolTable.SymbolError!*SymbolTable.Symbol {
+//     std.debug.assert(location < self.tree.items.len);
+//     const symbol_node = &self.tree.items[location];
+//     return symbol_node.map.resolvePtr(key) catch |err| switch (err) {
+//         SymbolTable.SymbolError.UnkownIdentifier => |e| {
+//             if (symbol_node.parent) |p| {
+//                 return self.resolvePtr(p, key);
+//             } else {
+//                 return e;
+//             }
+//         },
+//         SymbolTable.SymbolError.IdentifierRedecleration => unreachable,
+//     };
+// }
 
 pub fn resolve_node_data(
     self: *SymbolTree,
@@ -110,25 +119,50 @@ pub fn resolve_node_data(
     key: []const u8,
 ) SymbolTable.SymbolError!Ast.Node.NodeData {
     const symbol = try self.resolve(location, key);
-    return Ast.Node.NodeData{
-        .lhs = symbol.index,
-        .rhs = (@as(u32, @intCast(@intFromEnum(symbol.type))) << 2) | @intFromEnum(symbol.scope),
-    };
+    return symbol_to_identifier(symbol, self.get_depth(location));
 }
 
 pub fn identifier_to_symbol(node_data: Ast.Node.NodeData) SymbolTable.Symbol {
     return SymbolTable.Symbol{
-        .type = @enumFromInt(node_data.rhs >> 2),
+        .type = @enumFromInt((node_data.rhs >> 2) & 1),
         .scope = @enumFromInt(node_data.rhs & 3),
         .index = node_data.lhs,
+        .depth = @intCast(node_data.rhs >> 3),
     };
 }
 
-pub fn symbol_to_identifier(symbol: SymbolTable.Symbol) Ast.Node.NodeData {
+pub fn symbol_to_identifier(symbol: SymbolTable.Symbol, scope_depth: u16) Ast.Node.NodeData {
+    var relative_depth: u16 = 0;
+    if (symbol.depth <= scope_depth) {
+        relative_depth = scope_depth - symbol.depth;
+    } else {
+        unreachable;
+    }
     return Ast.Node.NodeData{
         .lhs = symbol.index,
-        .rhs = (@as(u32, @intCast(@intFromEnum(symbol.type))) << 2) | @intFromEnum(symbol.scope),
+        .rhs = (@as(u32, @intCast(@intFromEnum(symbol.type))) << 2) | @intFromEnum(symbol.scope) | (relative_depth << 3),
     };
+}
+
+pub fn print_tree_to_stderr(self: *SymbolTree) void {
+    std.debug.print("\n", .{});
+    std.debug.print("Symbol Tree\n", .{});
+    for (self.tree.items, 0..) |*value, i| {
+        var parent: i32 = 0;
+        if (value.parent) |p| {
+            parent = @intCast(p);
+        } else {
+            parent = -1;
+        }
+        std.debug.print("\tTree info: parent:{any}, depth:{d}, num_locals:{d}\n", .{
+            parent,
+            value.depth,
+            value.num_locals,
+        });
+        const symbol_node = &self.tree.items[i];
+        symbol_node.map.print_table_to_stderr();
+        std.debug.print("\n", .{});
+    }
 }
 
 test "Symbol Tree init" {
@@ -264,7 +298,7 @@ test "Random things" {
     const node = Ast.Node{
         .tag = .IDENTIFIER,
         .main_token = 0,
-        .node_data = symbol_to_identifier(hash2),
+        .node_data = symbol_to_identifier(hash2, 1),
     };
     try testing.expectEqual(0, node.node_data.lhs);
     try testing.expectEqual(0b110, node.node_data.rhs);

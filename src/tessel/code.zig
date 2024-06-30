@@ -102,6 +102,13 @@ fn format_instruction(def: []const u8, operands: []u32, buffer: *std.ArrayList(u
     assert(operands.len == def.len);
     var local_buffer: [1024]u8 = undefined;
     switch (num_operands) {
+        2 => {
+            try buffer.appendSlice(try std.fmt.bufPrint(
+                &local_buffer,
+                " {d} {d}",
+                .{ operands[0], operands[1] },
+            ));
+        },
         1 => {
             try buffer.appendSlice(try std.fmt.bufPrint(
                 &local_buffer,
@@ -173,8 +180,8 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .make_hash = &[_]u8{2},
     .call = &[_]u8{0},
     .op_return = &[_]u8{0},
-    .set_local = &[_]u8{2},
-    .get_local = &[_]u8{2},
+    .set_local = &[_]u8{ 2, 2 },
+    .get_local = &[_]u8{ 2, 2 },
 });
 
 test "test_definitions" {
@@ -245,8 +252,8 @@ test "make instructions string" {
     try make(&insts, .make_hash, &[_]u32{3});
     try make(&insts, .call, &[_]u32{});
     try make(&insts, .op_return, &[_]u32{});
-    try make(&insts, .set_local, &[_]u32{3});
-    try make(&insts, .get_local, &[_]u32{3});
+    try make(&insts, .set_local, &[_]u32{ 1, 3 });
+    try make(&insts, .get_local, &[_]u32{ 1, 3 });
 
     const expected_str =
         \\0000 load_const 1
@@ -276,8 +283,8 @@ test "make instructions string" {
         \\0044 make_hash 3
         \\0047 call
         \\0048 op_return
-        \\0049 set_local 3
-        \\0052 get_local 3
+        \\0049 set_local 1 3
+        \\0054 get_local 1 3
         \\
     ;
 

@@ -200,7 +200,7 @@ fn parse_while_loop(self: *Parser) Error!Ast.Node.NodeIndex {
     _ = try self.expect_token(.LPAREN);
     const condition = try self.parse_expect_expression();
     _ = try self.expect_token(.RPAREN);
-    const block = try self.parse_block(true);
+    const block = try self.parse_block(true, null);
     self.nodes.items(.node_data)[while_node].lhs = condition;
     self.nodes.items(.node_data)[while_node].rhs = block;
     return while_node;
@@ -272,7 +272,7 @@ fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     const ident_node = try self.add_node(.{
         .tag = .IDENTIFIER,
         .main_token = ident_token,
-        .node_data = SymbolTree.symbol_to_identifier(hash),
+        .node_data = SymbolTree.symbol_to_identifier(hash, self.tree.get_depth(scope)),
     });
 
     const expression = try self.parse_expect_expression();
@@ -735,6 +735,8 @@ fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     const current_scope = self.scope_stack.getLast();
     const new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
         SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
+        SymbolTree.Error.UnkownIdentifier => unreachable,
+        SymbolTree.Error.IdentifierRedecleration => unreachable,
         else => |overflow| return overflow,
     };
     try self.scope_stack.append(self.allocator, new_scope);
@@ -744,15 +746,20 @@ fn parse_function_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     const parameters = try self.parse_function_parameters(func_token);
     _ = try self.expect_token(.RPAREN);
 
-    const func_block = try self.parse_block(false);
+    const func_block = try self.parse_block(false, new_scope);
 
     _ = self.scope_stack.pop();
+    const num_locals = self.tree.tree.items[new_scope].num_locals;
+    const function_storage_start = self.extra_data.items.len;
+    try self.extra_data.append(self.allocator, func_block);
+    try self.extra_data.append(self.allocator, num_locals);
+
     return self.add_node(.{
         .tag = .FUNCTION_EXPRESSION, //
         .main_token = func_token,
         .node_data = .{
             .lhs = parameters, //
-            .rhs = func_block,
+            .rhs = @intCast(function_storage_start),
         },
     });
 }
@@ -811,7 +818,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     }
     _ = try self.expect_token(.RPAREN);
 
-    const if_block = try self.parse_block(true);
+    const if_block = try self.parse_block(true, null);
     if (!self.is_current_token(.ELSE)) {
         return self.add_node(.{
             .tag = .NAKED_IF,
@@ -824,7 +831,7 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     }
     _ = try self.expect_token(.ELSE);
 
-    const else_block = try self.parse_block(true);
+    const else_block = try self.parse_block(true, null);
     const block_storage_start = self.extra_data.items.len;
     try self.extra_data.append(self.allocator, if_block);
     try self.extra_data.append(self.allocator, else_block);
@@ -838,18 +845,24 @@ fn parse_if_expression(self: *Parser) Error!Ast.Node.NodeIndex {
     });
 }
 
-fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeIndex {
+fn parse_block(self: *Parser, allow_break_continue: bool, scope: ?SymbolTree.SymbolIndex) Error!Ast.Node.NodeIndex {
     const left_brace = try self.expect_token(.LBRACE);
 
     const scratch_top = self.scratch_pad.items.len;
     defer self.scratch_pad.shrinkRetainingCapacity(scratch_top);
-
-    const current_scope = self.scope_stack.getLast();
-    const new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
-        SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
-        else => |overflow| return overflow,
-    };
-    try self.scope_stack.append(self.allocator, new_scope);
+    var new_scope: SymbolTree.SymbolIndex = 0;
+    if (scope) |s| {
+        new_scope = s;
+    } else {
+        const current_scope = self.scope_stack.getLast();
+        new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
+            SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
+            SymbolTree.Error.UnkownIdentifier => unreachable,
+            SymbolTree.Error.IdentifierRedecleration => unreachable,
+            else => |overflow| return overflow,
+        };
+        try self.scope_stack.append(self.allocator, new_scope);
+    }
 
     // We will keep looping through statements till we encounter a closing brace
     while (true) {
@@ -871,8 +884,15 @@ fn parse_block(self: *Parser, allow_break_continue: bool) Error!Ast.Node.NodeInd
         try self.scratch_pad.append(self.allocator, statement);
     }
     _ = try self.expect_token(.RBRACE);
+    if (scope) |_| {} else {
+        const num_locals = self.tree.tree.items[new_scope].num_locals;
+        try self.scratch_pad.append(self.allocator, num_locals);
+    }
+
     const extra_data_loc = try self.append_slice_to_extra_data(self.scratch_pad.items[scratch_top..]);
-    _ = self.scope_stack.pop();
+    if (scope) |_| {} else {
+        _ = self.scope_stack.pop();
+    }
     return self.add_node(.{
         .tag = .BLOCK, //
         .main_token = left_brace,
@@ -1371,8 +1391,8 @@ test "parser_test_assignement_stmt" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 3,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 5,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1408,7 +1428,7 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 9,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
@@ -1426,7 +1446,7 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 12,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .BLOCK, //
@@ -1438,11 +1458,11 @@ test "parser_test_assignement_stmt" {
             .expectedNodeType = .FUNCTION_EXPRESSION, //
             .expectedMainToken = 7,
             .expectedDataLHS = 7,
-            .expectedDataRHS = 10,
+            .expectedDataRHS = 1,
         },
     };
 
-    const test_extras = [_]Ast.Node.NodeIndex{ 8, 1, 4 };
+    const test_extras = [_]Ast.Node.NodeIndex{ 8, 10, 1, 1, 4 };
     const int_literals = [_]i64{5};
 
     try parser_testing_test_extra(&ast, tests, test_extras, int_literals[0..], false);
@@ -1755,8 +1775,8 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 4,
-            .expectedDataRHS = 5,
+            .expectedDataLHS = 6,
+            .expectedDataRHS = 7,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1798,7 +1818,7 @@ test "parser_test_if_else_block" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 6,
+            .expectedDataRHS = 0b110,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1810,7 +1830,7 @@ test "parser_test_if_else_block" {
             .expectedNodeType = .BLOCK, //
             .expectedMainToken = 9,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1822,7 +1842,7 @@ test "parser_test_if_else_block" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 19,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 6,
+            .expectedDataRHS = 0b110,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1833,20 +1853,21 @@ test "parser_test_if_else_block" {
         .{
             .expectedNodeType = .BLOCK, //
             .expectedMainToken = 17,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .IF_ELSE, //
             .expectedMainToken = 3,
             .expectedDataLHS = 5,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 4,
         },
     };
 
-    const test_extra_data = [_]u32{ 6, 10, 9, 13, 1 };
+    const test_extra_data = [_]u32{ 6, 1, 10, 1, 9, 13, 1 };
     const int_literals = [_]i64{ 10, 10, 15 };
 
+    // symbol_tree.print_tree_to_stderr();
     try parser_testing_test_extra(&ast, tests, test_extra_data, int_literals[0..], false);
 }
 
@@ -1871,8 +1892,8 @@ test "parser_test_naked_if" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataLHS = 2,
+            .expectedDataRHS = 3,
         },
         .{
             .expectedNodeType = .VAR_STATEMENT, //
@@ -1914,7 +1935,7 @@ test "parser_test_naked_if" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 11,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 6,
+            .expectedDataRHS = 0b110,
         },
         .{
             .expectedNodeType = .INTEGER_LITERAL, //
@@ -1926,7 +1947,7 @@ test "parser_test_naked_if" {
             .expectedNodeType = .BLOCK, //
             .expectedMainToken = 9,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 1,
+            .expectedDataRHS = 2,
         },
         .{
             .expectedNodeType = .NAKED_IF, //
@@ -1936,7 +1957,7 @@ test "parser_test_naked_if" {
         },
     };
 
-    const test_extra_data = [_]u32{ 6, 1 };
+    const test_extra_data = [_]u32{ 6, 1, 1 };
 
     const int_literals = [_]i64{ 10, 10 };
 
@@ -2066,8 +2087,8 @@ test "parser_test_function_expression" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -2079,13 +2100,13 @@ test "parser_test_function_expression" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 2,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 4,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .FUNCTION_PARAMETER_BLOCK, //
@@ -2103,13 +2124,13 @@ test "parser_test_function_expression" {
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 8,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .IDENTIFIER, //
             .expectedMainToken = 10,
             .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataRHS = 0b010,
         },
         .{
             .expectedNodeType = .ADDITION, //
@@ -2127,11 +2148,11 @@ test "parser_test_function_expression" {
             .expectedNodeType = .FUNCTION_EXPRESSION, //
             .expectedMainToken = 0,
             .expectedDataLHS = 4,
-            .expectedDataRHS = 9,
+            .expectedDataRHS = 1,
         },
     };
 
-    const test_extra_data = [_]u32{ 5, 1 };
+    const test_extra_data = [_]u32{ 5, 9, 2, 1 };
 
     const int_literals = [_]i64{};
 
@@ -2158,8 +2179,8 @@ test "parser_test_function_empty_param" {
         .{
             .expectedNodeType = .ROOT, //
             .expectedMainToken = 0,
-            .expectedDataLHS = 1,
-            .expectedDataRHS = 2,
+            .expectedDataLHS = 3,
+            .expectedDataRHS = 4,
         },
         .{
             .expectedNodeType = .EXPRESSION_STATEMENT, //
@@ -2189,11 +2210,11 @@ test "parser_test_function_empty_param" {
             .expectedNodeType = .FUNCTION_EXPRESSION, //
             .expectedMainToken = 0,
             .expectedDataLHS = 0,
-            .expectedDataRHS = 4,
+            .expectedDataRHS = 1,
         },
     };
 
-    const test_extra_data = [_]u32{ 2, 1 };
+    const test_extra_data = [_]u32{ 2, 4, 0, 1 };
 
     const int_literals = [_]i64{10};
 
@@ -2333,7 +2354,16 @@ fn parser_testing_test_ast(ast: *Ast, test_nodes: anytype, int_literals: []const
     try testing_check_nodes(ast, test_nodes, enable_debug);
 }
 
-fn parser_testing_test_extra(ast: *Ast, test_nodes: anytype, test_extras: anytype, int_literals: []const i64, enable_debug: bool) !void {
+fn parser_testing_test_extra(
+    ast: *Ast,
+    test_nodes: anytype,
+    test_extras: anytype,
+    int_literals: []const i64,
+    enable_debug: bool,
+) !void {
+    if (enable_debug) {
+        ast.print_to_stderr();
+    }
     try testing.expectEqual(test_nodes.len, ast.nodes.len);
     try testing.expectEqual(0, ast.errors.len);
     try testing.expectEqual(test_extras.len, ast.extra_data.len);

@@ -2,6 +2,7 @@ pub const VM = @This();
 
 memory: Memory,
 allocator: Allocator,
+frame_starts: std.ArrayList(Memory.MemoryAddress),
 
 pub const VMError = error{
     InsufficientOperandsOnStack,
@@ -18,21 +19,30 @@ pub fn init(allocator: Allocator, reserve_memory: bool) !VM {
     return VM{
         .memory = try Memory.initCapacity(allocator, if (reserve_memory) memory_reservation else 0),
         .allocator = allocator,
+        .frame_starts = std.ArrayList(Memory.MemoryAddress).init(allocator),
     };
 }
 
 pub fn deinit(self: *VM) void {
     self.memory.deinit();
+    self.frame_starts.deinit();
 }
 
 pub fn run(self: *VM) !void {
-    try self.memory.stack_frames.push(self.allocator, self.memory.instructions.items, self.memory.ins_ptr);
+    try self.memory.stack_frames.push(
+        self.allocator,
+        self.memory.instructions.items,
+        self.memory.ins_ptr,
+        0,
+        0,
+    );
 
     // var self.memory.ins_ptr: usize = @intCast(start_index);
 
     while (self.memory.stack_frames.current_frame().ins_ptr < self.memory.stack_frames.current_frame().ins.len) {
         const current_frame = self.memory.stack_frames.current_frame();
         const op: Code.Opcode = @enumFromInt(current_frame.ins[current_frame.ins_ptr]);
+        // std.debug.print("Running Op: {s}\n", .{@tagName(op)});
 
         switch (op) {
             .load_const => {
@@ -72,18 +82,54 @@ pub fn run(self: *VM) !void {
                     self.allocator,
                     self.memory.function_storage.items[func.data.function.ptr .. func.data.function.ptr + func.data.function.len],
                     0,
+                    stack_ptr,
+                    func.data.function.num_locals,
                 );
+                for (0..func.data.function.num_locals) |i| {
+                    self.memory.memory.items(.tag)[stack_ptr + i] = .local;
+                }
+                self.memory.stack_ptr += func.data.function.num_locals;
+
                 continue;
             },
             .op_return => esc: {
-                const return_value = try self.memory.stack_pop();
+                var stack_ptr = self.memory.stack_top() orelse unreachable;
                 try self.memory.stack_frames.pop();
+                defer self.memory.stack_frames.stack_frames.shrinkRetainingCapacity(self.memory.stack_frames.frame_ptr);
 
-                const stack_ptr = self.memory.stack_top() orelse {
+                const frame = self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr];
+                const frame_size = stack_ptr - frame.stack_start;
+
+                var stack_top_tag = self.memory.get(stack_ptr - 1).tag;
+                var return_value: Memory.MemoryObject = undefined;
+                if (frame_size == frame.num_locals) {
+                    return_value = self.memory.get(Memory.null_object);
+                } else {
+                    if (stack_top_tag == .constant or stack_top_tag == .heap or stack_top_tag == .local) {
+                        try self.memory.dupe_locals(stack_ptr - 1, stack_ptr - 1);
+                    }
+                    return_value = try self.memory.stack_pop();
+                    self.memory.memory.items(.data)[self.memory.stack_ptr].integer = 0;
+                    self.memory.memory.items(.dtype)[self.memory.stack_ptr] = .null;
+                }
+                return_value.tag = .stack;
+
+                stack_ptr = self.memory.stack_top() orelse {
                     try self.memory.stack_push(self.memory.get(Memory.null_object));
                     break :esc;
                 };
-                if (self.memory.memory.get(stack_ptr - 1).dtype != .compiled_function) {
+
+                stack_top_tag = self.memory.get(stack_ptr - 1).tag;
+                if (stack_top_tag == .local) {
+                    var tag_memory_slice = self.memory.memory.slice().items(.tag);
+                    for (0..frame.num_locals) |i| {
+                        tag_memory_slice[stack_ptr - 1 - i] = .stack;
+                    }
+                    self.memory.stack_ptr -= frame.num_locals;
+                }
+
+                const stack_top_dtype = self.memory.get(self.memory.stack_ptr - 1).dtype;
+                if (stack_top_dtype != .compiled_function) {
                     try self.memory.stack_push(self.memory.get(Memory.null_object));
                     break :esc;
                 }
@@ -184,10 +230,26 @@ pub fn run(self: *VM) !void {
                 try self.memory.get_global(gid);
             },
             .set_local => {
-                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
+                const depth = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                const lid = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 3 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(4);
+
+                const local_stack_ptr = self.memory.stack_frames.get_stack_ptr_at_depth(depth);
+                const num_locals = self.memory.stack_frames.get_num_locals_at_depth(depth);
+                std.debug.assert(lid < num_locals);
+                const object_offset = local_stack_ptr + lid;
+                try self.memory.set_local(object_offset);
             },
             .get_local => {
-                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
+                const depth = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                const lid = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 3 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(4);
+
+                const local_stack_ptr = self.memory.stack_frames.get_stack_ptr_at_depth(depth);
+                const num_locals = self.memory.stack_frames.get_num_locals_at_depth(depth);
+                std.debug.assert(lid < num_locals);
+                const object_offset = local_stack_ptr + lid;
+                try self.memory.get_local(object_offset);
             },
         }
         self.memory.stack_frames.inc_current_frame_ins_ptr(1);
@@ -613,6 +675,7 @@ test "evaluate_while_loops" {
     const tests = [_]VMTestCase{
         .{ .source = "while (false) { 10; }", .expected = "null" },
         .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .expected = "10" },
+        // .{ .source = "var a = 0; while (a < 10) { const b = 1; a = a + b; } a", .expected = "10" },
         // .{
         //     .source =
         //     \\  const fn_call = fn(x) {
@@ -750,8 +813,17 @@ test "evaluate_identifiers" {
 
 test "evaluate_function_expressions" {
     const tests = [_]VMTestCase{
-        .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
+        // .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
         .{ .source = "fn() { 5 + 10 }()", .expected = "15" },
+        .{ .source = "fn() { \"foobar\" }()", .expected = "foobar" },
+        .{ .source = "fn() { [\"foo\",\"bar\"] }()", .expected = "[foo, bar, ]" },
+        .{ .source = "fn() { const c =  [\"foo\",\"bar\"] ; return c; }()", .expected = "[foo, bar, ]" },
+        .{ .source = "fn() { const c =  {1:\"foo\",2:\"bar\"} ; return [c[1], c[2]]; }()", .expected = "[foo, bar, ]" },
+        .{ .source = "fn() { var c =  {1:\"foo\",2:\"bar\"} ; c = [c[1], c[2]]; return c; }()", .expected = "[foo, bar, ]" },
+        .{ .source = "fn() { const c = \"foobar\"; return c; }()", .expected = "foobar" },
+        .{ .source = "fn() { var c = \"foo\"; const b = \"bar\"; c = c + b; return c; }()", .expected = "foobar" },
+        .{ .source = "fn() { const a = 5 + 10; return a; }()", .expected = "15" },
+        .{ .source = "fn() { const c = 10; const a = 5 + c; return a + c; }()", .expected = "25" },
         .{ .source = "var a = fn() { return 5 + 10 }; a()", .expected = "15" },
         .{ .source = "var a = fn() { if ( 1 < 5) { return 5 } else { return 1 } }; a()", .expected = "5" },
         .{ .source = "var a = fn() { if ( 1 > 5) { return 5 } }; a()", .expected = "null" },
@@ -759,6 +831,11 @@ test "evaluate_function_expressions" {
         .{ .source = "var a = fn() {}; var b = fn() { a() }; b()", .expected = "null" },
         .{ .source = "var a = fn() {}; var b = fn() { a }; b()()", .expected = "null" },
         .{ .source = "const a = fn() { return fn() { 5 + 10} }; a()()", .expected = "15" },
+        .{ .source = "const a = fn() { const c = 10; const b =  fn() { 5 + c}; return b() }; a()", .expected = "15" },
+        .{ .source = "const a = fn() { const c = \"foo\"; const b =  fn() { \"bar\" + c}; return b() }; a()", .expected = "barfoo" },
+        .{ .source = "const a = fn() { var c = \"foo\"; const b = fn() { const b = \"bar\"; c = c + b}; b(); return c; }; a()", .expected = "foobar" },
+        .{ .source = "const a = fn() { var c = {1: \"foo\", 2: \"bar\" }; const b = fn() { const b = \"bar\"; c = c[1] + b}; b(); return c; }; a()", .expected = "foobar" },
+        .{ .source = "const a = fn() { var c = {1: \"foo\", 2: \"bar\" }; const b = fn() { const b = \"bar\"; c = [ c[1], c[2], c[1] + b ]}; b(); return c; }; a()", .expected = "[foo, bar, foobar, ]" },
         .{
             .source = "const a = fn() { return fn() { if (1 < 5) { return 5 } else { return 1}} }; a()()",
             .expected = "5",

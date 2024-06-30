@@ -18,13 +18,13 @@ globals: []MemoryAddress,
 allocator: Allocator,
 
 pub const ConstantID = u32;
-pub const GlobalID = u32;
-pub const FunctionAddress = u32;
+pub const GlobalID = u16;
+pub const FunctionAddress = u16;
 
 pub const MemoryError = error{ StackOverflow, PoppingEmptyStack };
 pub const Error = MemoryError || Allocator.Error;
 
-pub const stack_limit = 8;
+pub const stack_limit = 2048;
 pub const globals_limit = 4096;
 pub const instruction_init_size = 4096;
 
@@ -48,7 +48,7 @@ pub fn init(allocator: Allocator) Allocator.Error!Memory {
 }
 
 pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory {
-    const internal_capacity = capacity + reserved_objects - stack_limit;
+    const internal_capacity: u32 = capacity + reserved_objects - stack_limit;
     var pool = Memory{
         .memory = .{},
         .free_list = .{},
@@ -67,6 +67,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
 
     // Creating the stack
     try pool.memory.resize(allocator, stack_limit + internal_capacity);
+
     var memory_slice = pool.memory.slice();
     const tag_slice = memory_slice.items(.tag);
     const dtype_slice = memory_slice.items(.dtype);
@@ -75,8 +76,6 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
 
     @memset(tag_slice, .stack);
     @memset(memory_slice.items(.dtype), .null);
-    // @memset(memory_slice.items(.refs), 0);
-    // @memset(memory_slice.items(.data), MemoryObject.ObjectData{ .integer = 0 });
     @memset(pool.globals, stack_limit);
 
     for (0..internal_capacity) |i| {
@@ -130,116 +129,104 @@ pub fn deinit(self: *Memory) void {
         if ((tag == .constant or tag == .heap) and i < stack_limit) {
             continue;
         }
+        // std.debug.print("Destroying location: {d}\n", .{i});
+        // std.debug.print("\tObject: {any}\n", .{memory_slice.get(i)});
         self.destroy(@as(MemoryAddress, @intCast(i)));
     }
     self.memory.deinit(self.allocator);
 }
 
 pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress {
-    if (dtype == .null) {
-        return null_object;
-    }
+    switch (dtype) {
+        .null => return null_object,
+        .builtin => {
+            const value: *const BuiltInFn = @ptrCast(@alignCast(data));
+            try self.memory.append(
+                self.allocator,
+                MemoryObject{
+                    .dtype = dtype,
+                    .data = .{ .builtin = value.* },
+                    .refs = 0,
+                },
+            );
+            self.reserved_memory += 1;
+            return @as(u32, @intCast(self.memory.len - 1));
+        },
+        .break_statement => return break_object,
+        .continue_statement => return continue_object,
+        .boolean => {
+            const value: *const bool = @ptrCast(@alignCast(data));
+            if (value.*) {
+                return true_object;
+            } else {
+                return false_object;
+            }
+        },
+        else => {
+            var location: MemoryAddress = 0;
+            if (self.free_list.items.len == 0) {
+                location = @as(MemoryAddress, @intCast(try self.memory.addOne(self.allocator)));
+            } else {
+                location = self.free_list.popOrNull() orelse unreachable;
+            }
+            try self.create(location, dtype, data);
 
-    if (dtype == .builtin) {
-        const value: *const BuiltInFn = @ptrCast(@alignCast(data));
-        try self.memory.append(
-            self.allocator,
-            MemoryObject{
-                .dtype = dtype,
-                .data = .{ .builtin = value.* },
-                .refs = 0,
-            },
-        );
-        self.reserved_memory += 1;
-        return @as(u32, @intCast(self.memory.len - 1));
+            try self.free_list.ensureTotalCapacity(self.allocator, self.memory.len - stack_limit + 1);
+            return location;
+        },
     }
-
-    if (dtype == .break_statement) {
-        return break_object;
-    }
-    if (dtype == .continue_statement) {
-        return continue_object;
-    }
-
-    if (dtype == .boolean) {
-        const value: *const bool = @ptrCast(@alignCast(data));
-        if (value.*) {
-            return true_object;
-        } else {
-            return false_object;
-        }
-    }
-
-    var location: MemoryAddress = 0;
-    if (self.free_list.items.len == 0) {
-        location = @as(MemoryAddress, @intCast(try self.memory.addOne(self.allocator)));
-    } else {
-        location = self.free_list.popOrNull() orelse unreachable;
-    }
-    try self.create(location, dtype, data);
-
-    try self.free_list.ensureTotalCapacity(self.allocator, self.memory.len - stack_limit + 1);
-    return location;
 }
 
 pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const anyopaque) !void {
-    var memory_data: []MemoryObject.ObjectData = self.memory.items(.data);
-    var memory_dtype: []Types = self.memory.items(.dtype);
+    const memory_data: *MemoryObject.ObjectData = &self.memory.items(.data)[location];
+    const memory_dtype: *Types = &self.memory.items(.dtype)[location];
     switch (dtype) {
         .integer => {
             const value: *const i64 = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .integer;
-            memory_data[location].integer = value.*;
+            memory_dtype.* = .integer;
+            memory_data.*.integer = value.*;
         },
         .return_expression => {
             const value: *const MemoryAddress = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .return_expression;
-            memory_data[location].return_value = value.*;
+            memory_dtype.* = .return_expression;
+            memory_data.*.return_value = value.*;
         },
         .compiled_function => {
             const value: *const MemoryObject.FunctionData = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .compiled_function;
-            memory_data[location].function = value.*;
+            memory_dtype.* = .compiled_function;
+            memory_data.*.function = value.*;
         },
         .runtime_error => {
             const value: *const MemoryObject.StringType = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .runtime_error;
-            memory_data[location].runtime_error.ptr = value.ptr;
-            memory_data[location].runtime_error.len = value.len;
+            memory_dtype.* = .runtime_error;
+            memory_data.*.string_type = try self.allocator.create(std.ArrayListUnmanaged(u8));
+            memory_data.*.string_type.* = std.ArrayListUnmanaged(u8).fromOwnedSlice(value.ptr[0..value.len]);
         },
         .string => {
             const value: *const MemoryObject.StringType = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .string;
-            memory_data[location].string_type = try self.allocator.create(std.ArrayListUnmanaged(u8));
-            memory_data[location].string_type.* = std.ArrayListUnmanaged(u8).fromOwnedSlice(value.ptr[0..value.len]);
+            memory_dtype.* = .string;
+            memory_data.*.string_type = try self.allocator.create(std.ArrayListUnmanaged(u8));
+            memory_data.*.string_type.* = std.ArrayListUnmanaged(u8).fromOwnedSlice(value.ptr[0..value.len]);
         },
         .array => {
             const value: *const MemoryObject.ArrayType = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .array;
-            memory_data[location].array = try self.allocator.create(
+            memory_dtype.* = .array;
+            memory_data.*.array = try self.allocator.create(
                 std.ArrayListUnmanaged(MemoryAddress),
             );
-            memory_data[location].array.* = std.ArrayListUnmanaged(MemoryAddress).fromOwnedSlice(@constCast(value.data));
+            memory_data.*.array.* = std.ArrayListUnmanaged(MemoryAddress).fromOwnedSlice(@constCast(value.data));
         },
         .hash_map => {
             const value: *const u32 = @ptrCast(@alignCast(data));
-            memory_dtype[location] = .hash_map;
-            memory_data[location].hash_map.map = try self.allocator.create(
-                std.AutoHashMapUnmanaged(
-                    MemoryObject.HashKey,
-                    MemoryAddress,
-                ),
-            );
-            memory_data[location].hash_map.keys = try self.allocator.create(
-                std.ArrayListUnmanaged(
-                    MemoryAddress,
-                ),
-            );
-            memory_data[location].hash_map.map.* = .{};
-            memory_data[location].hash_map.keys.* = .{};
-            try memory_data[location].hash_map.map.ensureUnusedCapacity(self.allocator, value.*);
-            try memory_data[location].hash_map.keys.ensureUnusedCapacity(self.allocator, value.*);
+            memory_dtype.* = .hash_map;
+            memory_data.*.hash_map = try self.allocator.create(MemoryObject.HashData);
+            memory_data.*.hash_map.map = .{};
+            memory_data.*.hash_map.keys = .{};
+            try memory_data.*.hash_map.map.ensureUnusedCapacity(self.allocator, value.*);
+            try memory_data.*.hash_map.keys.ensureUnusedCapacity(self.allocator, value.*);
         },
+        .closure => {},
+        .stack_frame => {},
         .builtin => unreachable,
         .null => unreachable,
         .boolean => unreachable,
@@ -290,6 +277,8 @@ pub fn dupe(self: *Memory, addr: MemoryAddress) !MemoryAddress {
         },
         .return_expression, .null, .boolean, .break_statement, .continue_statement, .builtin => return addr,
         .runtime_error => unreachable,
+        .closure => unreachable,
+        .stack_frame => unreachable,
     }
 }
 
@@ -326,10 +315,70 @@ pub fn dupe_onto_stack(self: *Memory, addr: MemoryAddress) !void {
                 self.increase_ref(new_key);
             }
         },
+        .closure => unreachable,
+        .stack_frame => unreachable,
         .return_expression, .compiled_function, .null, .boolean, .break_statement, .continue_statement, .builtin => {
             try self.stack_push(data);
         },
         .runtime_error => unreachable,
+    }
+}
+
+pub fn dupe_locals(self: *Memory, from: MemoryAddress, to: MemoryAddress) !void {
+    std.debug.assert(from < stack_limit + reserved_objects);
+    std.debug.assert(to < stack_limit + reserved_objects);
+
+    const data = self.get(from);
+    switch (data.dtype) {
+        .integer => {
+            try self.create(to, .integer, @ptrCast(&data.data.integer));
+        },
+        .string => {
+            var output = try data.data.string_type.clone(self.allocator);
+            try self.create(to, .string, @ptrCast(&(try output.toOwnedSlice(self.allocator))));
+        },
+        .array => {
+            var new_objects = try std.ArrayList(MemoryAddress).initCapacity(self.allocator, data.data.array.items.len);
+            for (0..data.data.array.items.len) |i| {
+                new_objects.appendAssumeCapacity(try self.dupe(data.data.array.items[i]));
+            }
+            try self.create(to, .array, @ptrCast(&(try new_objects.toOwnedSlice())));
+        },
+        .hash_map => {
+            var keys = data.data.hash_map.keys.items;
+            try self.create(to, .hash_map, @ptrCast(&keys.len));
+            const map_data = self.memory.get(to);
+            for (keys) |key| {
+                const new_key = try self.dupe(key);
+                const hash = MemoryObject.HashKey.create(self.get(new_key));
+                const value = try self.dupe(data.data.hash_map.map.get(hash).?);
+                map_data.data.hash_map.map.putAssumeCapacity(hash, value);
+                map_data.data.hash_map.keys.appendAssumeCapacity(new_key);
+                self.increase_ref(value);
+                self.increase_ref(new_key);
+            }
+        },
+        .compiled_function => {
+            try self.create(to, .compiled_function, @ptrCast(&data.data.function));
+        },
+        .boolean => {
+            const obj = if (data.data.boolean) self.get(true_object) else self.get(false_object);
+            self.memory.set(to, obj);
+        },
+        .null => {
+            self.memory.set(to, self.get(null_object));
+        },
+        .continue_statement => {
+            unreachable;
+        },
+        .break_statement => {
+            unreachable;
+        },
+        .return_expression => unreachable,
+        .builtin => unreachable,
+        .runtime_error => unreachable,
+        .closure => unreachable,
+        .stack_frame => unreachable,
     }
 }
 
@@ -339,75 +388,78 @@ pub fn free(self: *Memory, ptr: MemoryAddress) void {
         return;
     }
     const memory_slice = self.memory.slice();
-    const refs = memory_slice.items(.refs);
+    const refs = &memory_slice.items(.refs)[ptr];
     const tag = memory_slice.items(.tag)[ptr];
     if (tag == .constant) {
         return;
     }
 
-    if (refs[ptr] == 0) {
+    if (refs.* == 0) {
         self.destroy(ptr);
         if (tag != .stack) {
             self.free_list.appendAssumeCapacity(ptr);
         }
     } else {
-        refs[ptr] -= 1;
+        refs.* -= 1;
     }
 }
 
 fn destroy(self: *Memory, ptr: MemoryAddress) void {
     const memory_slice = self.memory.slice();
     const tag: Types = memory_slice.items(.dtype)[ptr];
-    var memory_data: []MemoryObject.ObjectData = memory_slice.items(.data);
+    var memory_data: *MemoryObject.ObjectData = &memory_slice.items(.data)[ptr];
     switch (tag) {
         .integer => {},
         .return_expression => {},
         .compiled_function => {},
         .runtime_error => {
-            self.allocator.free(
-                memory_data[ptr].runtime_error.ptr[0..memory_data[ptr].runtime_error.len],
-            );
-            memory_data[ptr].runtime_error.len = 0;
+            const str_ptr = memory_data.runtime_error;
+            str_ptr.deinit(self.allocator);
+            self.allocator.destroy(str_ptr);
         },
         .string => {
-            const str_ptr = memory_data[ptr].string_type;
+            const str_ptr = memory_data.string_type;
             str_ptr.deinit(self.allocator);
             self.allocator.destroy(str_ptr);
         },
         .hash_map => {
-            const map = memory_data[ptr].hash_map.map;
+            const map = &memory_data.hash_map.map;
             var value_iter = map.valueIterator();
             while (value_iter.next()) |value| {
                 self.free(value.*);
             }
             map.deinit(self.allocator);
-            const keys: *std.ArrayListUnmanaged(MemoryAddress) = memory_data[ptr].hash_map.keys;
+            const keys: *std.ArrayListUnmanaged(MemoryAddress) = &memory_data.hash_map.keys;
             for (keys.items) |i| {
                 self.free(i);
             }
             keys.deinit(self.allocator);
-            self.allocator.destroy(map);
-            self.allocator.destroy(keys);
+            // self.allocator.destroy(map);
+            // self.allocator.destroy(keys);
+            self.allocator.destroy(memory_data.hash_map);
         },
         .array => {
-            const arr_ptr = memory_data[ptr].array;
+            const arr_ptr = memory_data.array;
             for (arr_ptr.items) |pos| {
                 self.destroy(pos);
             }
             arr_ptr.deinit(self.allocator);
             self.allocator.destroy(arr_ptr);
         },
+        .closure => {},
+        .stack_frame => {},
         .null, .boolean, .break_statement, .continue_statement, .builtin => return,
     }
     memory_slice.items(.dtype)[ptr] = .null;
     memory_slice.items(.data)[ptr].integer = 0;
 }
 
-pub fn register_function(self: *Memory, instructions: []const u8) !ConstantID {
+pub fn register_function(self: *Memory, instructions: []const u8, num_locals: u16) !ConstantID {
     const function_location = self.function_storage.items.len;
     try self.function_storage.appendSlice(instructions);
     const func_data = MemoryObject.FunctionData{
         .ptr = @intCast(function_location),
+        .num_locals = num_locals,
         .len = @intCast(instructions.len),
     };
     return self.register_constant(.compiled_function, @ptrCast(&func_data));
@@ -423,6 +475,36 @@ pub fn register_constant(self: *Memory, dtype: Types, data: *const anyopaque) !C
 pub fn get_constant(self: *Memory, id: ConstantID) MemoryObject {
     std.debug.assert(id < self.constants.items.len);
     return self.memory.get(self.constants.items[id]);
+}
+
+pub fn set_local(self: *Memory, ptr: MemoryAddress) Error!void {
+    std.debug.assert(ptr < stack_limit);
+
+    self.stack_ptr -= 1;
+    const data: MemoryObject = self.memory.get(self.stack_ptr);
+    self.destroy(ptr);
+
+    if (data.tag == .constant or data.tag == .heap or data.tag == .local) {
+        try self.dupe_locals(self.stack_ptr, ptr);
+        var memory_slice = self.memory.slice();
+        memory_slice.items(.data)[self.stack_ptr].integer = 0;
+        memory_slice.items(.dtype)[self.stack_ptr] = .null;
+        memory_slice.items(.tag)[ptr] = .local;
+        return;
+    }
+
+    var memory_slice = self.memory.slice();
+    memory_slice.set(ptr, data);
+    memory_slice.items(.data)[self.stack_ptr].integer = 0;
+    memory_slice.items(.dtype)[self.stack_ptr] = .null;
+    memory_slice.items(.tag)[ptr] = .local;
+}
+
+pub fn get_local(self: *Memory, ptr: MemoryAddress) Error!void {
+    std.debug.assert(ptr < stack_limit);
+    const obj = self.get(ptr);
+    std.debug.assert(obj.tag == .local);
+    try self.stack_push(obj);
 }
 
 // Give ownership of top of stack to global id
@@ -468,7 +550,7 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
         else => {},
     }
 
-    if (data.tag == .constant or data.tag == .heap) {
+    if (data.tag == .constant or data.tag == .heap or data.tag == .local) {
         ptr = try self.dupe(self.stack_ptr);
         if (ptr > self.reserved_memory) {
             self.globals[id] = ptr;
@@ -623,7 +705,7 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
     var memory_slice = self.memory.slice();
     if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
         const tag = memory_slice.items(.tag)[self.stack_ptr];
-        if (tag != .constant and tag != .heap)
+        if (tag != .constant and tag != .heap and tag != .local)
             self.destroy(self.stack_ptr);
     }
 
@@ -656,7 +738,15 @@ pub fn stack_pop(self: *Memory) MemoryError!MemoryObject {
         return Error.PoppingEmptyStack;
     }
     self.stack_ptr -= 1;
-    return self.memory.get(self.stack_ptr);
+    const obj = self.memory.get(self.stack_ptr);
+    const tag = obj.tag;
+    if (tag == .local) {
+        var memory_slice = self.memory.slice();
+        memory_slice.items(.dtype)[self.stack_ptr] = .null;
+        memory_slice.items(.data)[self.stack_ptr].integer = 0;
+        memory_slice.items(.tag)[self.stack_ptr] = .stack;
+    }
+    return obj;
 }
 
 pub fn stack_top(self: *Memory) ?u32 {
@@ -673,8 +763,8 @@ pub const FrameIndex = u32;
 pub const MemoryObject = struct {
     tag: Tag = .stack,
     dtype: Types,
-    data: ObjectData,
     refs: u32,
+    data: ObjectData,
 
     pub const ObjectData = extern union {
         // Passed by value
@@ -683,21 +773,32 @@ pub const MemoryObject = struct {
         return_value: MemoryAddress,
         function: FunctionData,
         // Passed By reference,
-        runtime_error: StringType,
+        runtime_error: String,
         builtin: BuiltInFn,
-        string_type: *std.ArrayListUnmanaged(u8),
-        array: *std.ArrayListUnmanaged(MemoryAddress),
-        hash_map: HashData,
+        string_type: String,
+        array: Array,
+        hash_map: *HashData,
+        closure: Closure,
+        stack_frame: Array,
+    };
+
+    pub const String = *std.ArrayListUnmanaged(u8);
+    pub const Array = *std.ArrayListUnmanaged(MemoryAddress);
+
+    pub const Closure = extern struct {
+        function: MemoryAddress,
+        stack_frame: MemoryAddress,
     };
 
     pub const FunctionData = extern struct {
         ptr: FunctionAddress,
+        num_locals: u16,
         len: u32,
     };
 
-    pub const HashData = extern struct {
-        map: *std.AutoHashMapUnmanaged(HashKey, MemoryAddress),
-        keys: *std.ArrayListUnmanaged(MemoryAddress),
+    pub const HashData = struct {
+        map: std.AutoHashMapUnmanaged(HashKey, MemoryAddress),
+        keys: std.ArrayListUnmanaged(MemoryAddress),
     };
 
     pub const HashKey = struct {
@@ -765,6 +866,7 @@ pub const MemoryObject = struct {
         builtin,
         heap,
         stack,
+        local,
         constant,
     };
 };
@@ -781,6 +883,8 @@ pub const Types = enum(u8) {
     continue_statement,
     runtime_error,
     builtin,
+    closure,
+    stack_frame,
     null,
 };
 
@@ -798,7 +902,7 @@ pub fn ObjectToString(self: *Memory, obj: MemoryObject, buffer: []u8) ![]const u
         },
         .runtime_error => {
             const data = obj.data.runtime_error;
-            return std.fmt.bufPrint(buffer, "{s}", .{data.ptr[0..data.len]});
+            return std.fmt.bufPrint(buffer, "{s}", .{data.items});
         },
         .array => {
             var local_buffer: [4096]u8 = undefined;
@@ -837,6 +941,8 @@ pub fn ObjectToString(self: *Memory, obj: MemoryObject, buffer: []u8) ![]const u
             try local_array.appendSlice("}");
             return std.fmt.bufPrint(buffer, "{s}", .{local_array.items});
         },
+        .closure => unreachable,
+        .stack_frame => unreachable,
         .null => return std.fmt.bufPrint(buffer, "null", .{}),
         .compiled_function => return std.fmt.bufPrint(buffer, "Function@{d}", .{obj.data.function.ptr}),
         .builtin => unreachable,
@@ -1005,6 +1111,18 @@ test "Memory init" {
     // std.debug.print("Time to test: {s}\n", .{std.fmt.fmtDuration(end)});
     // std.debug.print("\n", .{});
     // std.debug.print("\n", .{});
+}
+
+test "sizes" {
+    std.debug.print("Size of Memory Object: {}\n", .{@sizeOf(MemoryObject)});
+    std.debug.print("Size of Object Data: {}\n", .{@sizeOf(MemoryObject.ObjectData)});
+    std.debug.print("Size of Object Tag: {}\n", .{@sizeOf(MemoryObject.Tag)});
+    std.debug.print("Size of FunctionData: {}\n", .{@sizeOf(MemoryObject.FunctionData)});
+    std.debug.print("Size of HashData: {}\n", .{@sizeOf(*MemoryObject.HashData)});
+    std.debug.print("Size of StringType: {}\n", .{@sizeOf(MemoryObject.StringType)});
+    std.debug.print("Size of ArrayType: {}\n", .{@sizeOf(MemoryObject.ArrayType)});
+    std.debug.print("Size of String: {}\n", .{@sizeOf(MemoryObject.String)});
+    std.debug.print("Size of Array: {}\n", .{@sizeOf(MemoryObject.Array)});
 }
 
 const std = @import("std");
