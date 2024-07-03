@@ -151,6 +151,8 @@ pub const Opcode = enum(u8) {
     op_return,
     set_local,
     get_local,
+    enter_scope,
+    leave_scope,
 };
 
 pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, null, 0, .{
@@ -182,6 +184,8 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .op_return = &[_]u8{0},
     .set_local = &[_]u8{ 2, 2 },
     .get_local = &[_]u8{ 2, 2 },
+    .enter_scope = &[_]u8{2},
+    .leave_scope = &[_]u8{2},
 });
 
 test "test_definitions" {
@@ -254,6 +258,8 @@ test "make instructions string" {
     try make(&insts, .op_return, &[_]u32{});
     try make(&insts, .set_local, &[_]u32{ 1, 3 });
     try make(&insts, .get_local, &[_]u32{ 1, 3 });
+    try make(&insts, .enter_scope, &[_]u32{2});
+    try make(&insts, .leave_scope, &[_]u32{2});
 
     const expected_str =
         \\0000 load_const 1
@@ -285,6 +291,8 @@ test "make instructions string" {
         \\0048 op_return
         \\0049 set_local 1 3
         \\0054 get_local 1 3
+        \\0059 enter_scope 2
+        \\0062 leave_scope 2
         \\
     ;
 

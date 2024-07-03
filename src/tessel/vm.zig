@@ -10,6 +10,7 @@ pub const VMError = error{
     IndexOutOfBounds,
     InvalidKey,
     CallingNonFunction,
+    LeavingScope,
 };
 pub const Error = VMError || Allocator.Error || Memory.MemoryError;
 
@@ -42,7 +43,11 @@ pub fn run(self: *VM) !void {
     while (self.memory.stack_frames.current_frame().ins_ptr < self.memory.stack_frames.current_frame().ins.len) {
         const current_frame = self.memory.stack_frames.current_frame();
         const op: Code.Opcode = @enumFromInt(current_frame.ins[current_frame.ins_ptr]);
-        // std.debug.print("Running Op: {s}\n", .{@tagName(op)});
+        // std.debug.print("Running Op: {s}, Stack depth: {d}\n", .{ @tagName(op), self.memory.stack_frames.stack_frames.items.len });
+
+        // const out = try Code.code_to_str(testing.allocator, current_frame.ins[current_frame.ins_ptr..]);
+        // defer testing.allocator.free(out);
+        // std.debug.print("Instructions in the frame:\n {s}\n", .{out});
 
         switch (op) {
             .load_const => {
@@ -136,6 +141,63 @@ pub fn run(self: *VM) !void {
                 _ = try self.memory.stack_pop(); // remove the function
                 try self.memory.stack_push(return_value);
             },
+            .enter_scope => {
+                const stack_ptr = self.memory.stack_ptr;
+
+                const num_locals = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
+
+                const frame = self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr - 1];
+                try self.memory.stack_frames.push(
+                    self.allocator,
+                    frame.ins,
+                    frame.ins_ptr,
+                    stack_ptr,
+                    num_locals,
+                );
+
+                for (0..num_locals) |i| {
+                    self.memory.memory.items(.tag)[stack_ptr + i] = .local;
+                }
+                self.memory.stack_ptr += num_locals;
+            },
+            .leave_scope => esc: {
+                const stack_ptr = self.memory.stack_ptr;
+                const num_locals = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                self.memory.stack_frames.inc_current_frame_ins_ptr(2);
+
+                try self.memory.stack_frames.pop();
+                defer self.memory.stack_frames.stack_frames.shrinkRetainingCapacity(self.memory.stack_frames.frame_ptr);
+
+                const frame = self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr];
+                const frame_size = stack_ptr - frame.stack_start;
+                self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr - 1].ins_ptr = frame.ins_ptr;
+
+                var return_value: Memory.MemoryObject = undefined;
+
+                if (frame_size > num_locals) {
+                    if (num_locals == 0) {
+                        break :esc;
+                    }
+                    const stack_top_tag = self.memory.get(stack_ptr - 1).tag;
+                    if (stack_top_tag == .constant or stack_top_tag == .heap or stack_top_tag == .local) {
+                        try self.memory.dupe_locals(stack_ptr - 1, stack_ptr - 1);
+                    }
+                    return_value = try self.memory.stack_pop();
+                    self.memory.memory.items(.data)[self.memory.stack_ptr].integer = 0;
+                    self.memory.memory.items(.dtype)[self.memory.stack_ptr] = .null;
+                } else if (frame_size == frame.num_locals) {
+                    return_value = self.memory.get(Memory.null_object);
+                }
+                return_value.tag = .stack;
+
+                var tag_memory_slice = self.memory.memory.slice().items(.tag);
+                for (0..frame.num_locals) |i| {
+                    tag_memory_slice[stack_ptr - 1 - i] = .stack;
+                }
+                self.memory.stack_ptr -= frame.num_locals;
+                try self.memory.stack_push(return_value);
+            },
             .pop => {
                 if (self.memory.stack_ptr == 0) {
                     self.memory.stack_frames.inc_current_frame_ins_ptr(1);
@@ -209,10 +271,12 @@ pub fn run(self: *VM) !void {
                 };
 
                 if (condition) {
+                    // std.debug.print("Condition is true!\n", .{});
                     self.memory.stack_frames.inc_current_frame_ins_ptr(5);
                     continue;
                 } else {
                     const destination = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
+                    // std.debug.print("Condition not true! jumping to {d}\n", .{destination});
                     self.memory.stack_frames.set_current_frame_ins_ptr(destination);
                     continue;
                 }
@@ -626,7 +690,7 @@ test "run_if_expressions" {
         .{ .source = "if (1 > 2) { 10 }", .expected = "null" },
         .{ .source = "if (1 > 2) { 10 } else { 20 }", .expected = "20" },
         .{ .source = "if (1 < 2) { 10 } else { 20 }", .expected = "10" },
-        // .{ .source = "if (1 < 2) { if(1 < 2) { return 10; } return 1; } else { 20 }", .expected = "10" },
+        .{ .source = "const a = if (1 < 2) { const b = 10;  b + 2; } else { 20 }; a", .expected = "12" },
         .{ .source = "if (1 < 2) { if ( 3 < 2 ) { 30 } else{ if (1 < 2 * 5 + 3) { 10 } }} else { 20 }", .expected = "10" },
     };
 
@@ -675,7 +739,9 @@ test "evaluate_while_loops" {
     const tests = [_]VMTestCase{
         .{ .source = "while (false) { 10; }", .expected = "null" },
         .{ .source = "var a = 0; while (a < 10) { a = a + 1; } a", .expected = "10" },
-        // .{ .source = "var a = 0; while (a < 10) { const b = 1; a = a + b; } a", .expected = "10" },
+        .{ .source = "var a = 0; while (a < 10) { const b = 1; a = a + b; } a", .expected = "10" },
+        .{ .source = "var a = 0; while (a < 10) { if (a == 5) { break; }; const b = 1; a = a + b; } a", .expected = "5" },
+        .{ .source = "var a = 0; while (a < 10) { if (a == 5) { a = 20; continue; }; const b = 1; a = a + b; } a", .expected = "20" },
         // .{
         //     .source =
         //     \\  const fn_call = fn(x) {
@@ -934,13 +1000,17 @@ fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
         try vm.run();
 
         const sptr = vm.memory.stack_top() orelse 0;
-        // std.debug.print("SPTR: {d}\n", .{sptr});
         const object = vm.memory.memory.get(sptr);
-        // std.debug.print("OBJECT: {any}\n", .{object});
+        if (debug_print) {
+            std.debug.print("SPTR: {d}\n", .{sptr});
+            std.debug.print("OBJECT: {any}\n", .{object});
+        }
 
+        try testing.expectEqual(0, sptr);
         const outstr = try vm.memory.ObjectToString(object, &buffer);
         try testing.expectEqualSlices(u8, t.expected, outstr);
         if (debug_print) {
+            std.debug.print("Output!: {s}\n", .{outstr});
             std.debug.print("Test Passed!\n", .{});
         }
     }

@@ -95,6 +95,7 @@ pub fn start() !void {
             const sptr = vm.memory.stack_top() orelse 0;
             const object = vm.memory.memory.get(sptr);
             std.debug.print("Instruction pointer: {d}\n", .{vm.memory.ins_ptr});
+            std.debug.print("Stack Ptr: {d}\n", .{sptr});
 
             const outstr = try vm.memory.ObjectToString(object, &buffer);
             try stdout.print("Output >> {s}\n", .{outstr});

@@ -197,12 +197,28 @@ fn parse_while_loop(self: *Parser) Error!Ast.Node.NodeIndex {
         .main_token = self.next_token(),
         .node_data = .{ .lhs = 0, .rhs = 0 },
     });
+    const current_scope = self.scope_stack.getLast();
+    const new_scope = self.tree.create_table(current_scope) catch |err| switch (err) {
+        SymbolTree.SymbolTreeError.ReinitialisingGlobalTree => unreachable,
+        SymbolTree.Error.UnkownIdentifier => unreachable,
+        SymbolTree.Error.IdentifierRedecleration => unreachable,
+        else => |overflow| return overflow,
+    };
+
+    try self.scope_stack.append(self.allocator, new_scope);
     _ = try self.expect_token(.LPAREN);
     const condition = try self.parse_expect_expression();
     _ = try self.expect_token(.RPAREN);
-    const block = try self.parse_block(true, null);
+    const block = try self.parse_block(true, new_scope);
     self.nodes.items(.node_data)[while_node].lhs = condition;
-    self.nodes.items(.node_data)[while_node].rhs = block;
+
+    const num_locals = self.tree.tree.items[new_scope].num_locals;
+    const block_start = self.extra_data.items.len;
+    try self.extra_data.append(self.allocator, block);
+    try self.extra_data.append(self.allocator, num_locals);
+    self.nodes.items(.node_data)[while_node].rhs = @intCast(block_start);
+
+    _ = self.scope_stack.pop();
     return while_node;
 }
 

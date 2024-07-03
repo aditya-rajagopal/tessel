@@ -1,18 +1,41 @@
 pub const Compiler = @This();
+// TODO: Repl is broken somehow. It prints wrong outputs
+// TODO: Deal with function parameters.
+// TODO: Closures
 
 memory: *Memory,
 allocator: Allocator,
 scratch_pad: std.ArrayList(u8),
 emit_to_scratch: bool,
 scratch_ptrs: std.ArrayList(usize),
+
+break_locations: std.ArrayList(u32),
+continue_location: std.ArrayList(u32),
+
 last_statement: Ast.Node.Tag,
+scope_stack: std.ArrayList(CompileScope),
+
+pub const CompileScope = struct {
+    type: Tag,
+    num_locals: u32,
+
+    pub const Tag = enum {
+        while_loop,
+        block,
+        function,
+    };
+};
 
 pub const CompilerErrors = error{
     IllegalAstNodeReference,
     ReferencingRootNode,
     AssigningToConst,
     EmptyHashLiteral,
+    IllegalBreak,
+    IllegalContinue,
+    IllegalReturn,
 };
+
 const Error = CompilerErrors || Allocator.Error;
 
 pub fn create(allocator: Allocator, memory: *Memory) !Compiler {
@@ -21,6 +44,9 @@ pub fn create(allocator: Allocator, memory: *Memory) !Compiler {
         .allocator = allocator,
         .scratch_pad = std.ArrayList(u8).init(allocator),
         .scratch_ptrs = std.ArrayList(usize).init(allocator),
+        .break_locations = std.ArrayList(u32).init(allocator),
+        .continue_location = std.ArrayList(u32).init(allocator),
+        .scope_stack = std.ArrayList(CompileScope).init(allocator),
         .emit_to_scratch = false,
         .last_statement = .ROOT,
     };
@@ -42,6 +68,9 @@ pub fn compile(self: *Compiler, ast: *const Ast, start: usize) !void {
     try self.compile_program_statements(ast, statements[start..]);
     self.scratch_pad.deinit();
     self.scratch_ptrs.deinit();
+    self.break_locations.deinit();
+    self.continue_location.deinit();
+    self.scope_stack.deinit();
 }
 
 fn compile_program_statements(self: *Compiler, ast: *const Ast, statements: []u32) !void {
@@ -104,8 +133,11 @@ fn compile_statement(
                 const end = self.get_current_ins_ptr();
                 var i = start;
                 var is_modifying = false;
-                while (i < end) {
-                    // const op: Code.Opcode = @enumFromInt(self.memory.instructions.items[i]);
+                const expression_type = ast.nodes.get(ast_node.node_data.lhs).tag;
+                if (expression_type == .FUNCTION_CALL or expression_type == .NAKED_IF) {
+                    is_modifying = true;
+                }
+                while (i < end and !is_modifying) {
                     const op: Code.Opcode = @enumFromInt(self.get_ins_byte(i));
                     if (op == .set_global or op == .set_local or op == .call) {
                         is_modifying = true;
@@ -152,9 +184,79 @@ fn compile_statement(
         .WHILE_LOOP => {
             try self.compile_while_loop(ast, ast_node);
         },
-        .RETURN_STATEMENT => {
+        .RETURN_STATEMENT => esc: {
             try self.compile_expression(ast, ast_node.node_data.lhs);
-            try self.emit(.op_return, &[_]u32{});
+            if (self.scope_stack.items.len > 0) {
+                var i = self.scope_stack.items.len - 1;
+                while (i >= 0) {
+                    const scope = self.scope_stack.items[i];
+                    switch (scope.type) {
+                        .block, .while_loop => {
+                            try self.emit(.leave_scope, &[_]u32{scope.num_locals});
+                            i -= 1;
+                        },
+                        .function => {
+                            try self.emit(.op_return, &[_]u32{});
+                            break :esc;
+                        },
+                    }
+                }
+                return CompilerErrors.IllegalReturn;
+            } else {
+                return CompilerErrors.IllegalReturn;
+            }
+        },
+        .BREAK_STATEMENT => esc: {
+            if (self.scope_stack.items.len > 0) {
+                var i = self.scope_stack.items.len - 1;
+                while (i >= 0) {
+                    const scope = self.scope_stack.items[i];
+                    switch (scope.type) {
+                        .block => {
+                            try self.emit(.leave_scope, &[_]u32{scope.num_locals});
+                            i -= 1;
+                        },
+                        .while_loop => {
+                            const jn_pos = self.get_current_ins_ptr();
+                            try self.emit(.jmp, &[_]u32{9090});
+                            try self.break_locations.append(@intCast(jn_pos));
+                            break :esc;
+                        },
+                        .function => {
+                            // found function scope before a while scope
+                            return CompilerErrors.IllegalBreak;
+                        },
+                    }
+                }
+                return CompilerErrors.IllegalBreak;
+            } else {
+                return CompilerErrors.IllegalBreak;
+            }
+        },
+        .CONTINUE_STATEMENT => esc: {
+            if (self.scope_stack.items.len > 0) {
+                var i = self.scope_stack.items.len - 1;
+                while (i >= 0) {
+                    const scope = self.scope_stack.items[i];
+                    switch (scope.type) {
+                        .block => {
+                            try self.emit(.leave_scope, &[_]u32{scope.num_locals});
+                            i -= 1;
+                        },
+                        .while_loop => {
+                            const location = self.continue_location.getLast();
+                            try self.emit(.jmp, &[_]u32{location});
+                            break :esc;
+                        },
+                        .function => {
+                            return CompilerErrors.IllegalBreak;
+                        },
+                    }
+                }
+                return CompilerErrors.IllegalBreak;
+            } else {
+                return CompilerErrors.IllegalContinue;
+            }
         },
         else => unreachable,
     }
@@ -162,28 +264,47 @@ fn compile_statement(
 }
 
 fn compile_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!void {
+    const break_start = self.break_locations.items.len;
+
+    const block_node = ast.extra_data[node.node_data.rhs];
+    const block_node_tag = ast.nodes.items(.tag)[block_node];
+    std.debug.assert(block_node_tag == .BLOCK);
+    const block_node_data = ast.nodes.items(.node_data)[block_node];
+    const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+
+    const num_locals = ast.extra_data[node.node_data.rhs + 1];
+    try self.scope_stack.append(CompileScope{
+        .type = .while_loop,
+        .num_locals = num_locals,
+    });
+    defer _ = self.scope_stack.pop();
+
+    try self.emit(.enter_scope, &[_]u32{num_locals});
+
     const eval_start: u32 = @intCast(self.get_current_ins_ptr());
+    try self.continue_location.append(eval_start);
+    defer _ = self.continue_location.pop();
     try self.compile_expression(ast, node.node_data.lhs);
 
     const jn_pos = self.get_current_ins_ptr();
     try self.emit(.jn, &[_]u32{9090});
 
-    const block_node_tag = ast.nodes.items(.tag)[node.node_data.rhs];
-    std.debug.assert(block_node_tag == .BLOCK);
-    const block_node_data = ast.nodes.items(.node_data)[node.node_data.rhs];
-    const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
-    // const num_locals = statements[block_node_data.rhs - 1];
-    // _ = num_locals;
     try self.compile_block_statements(ast, .{
-        .statements = statements[0 .. statements.len - 1],
-        .pop_last = false,
+        .statements = statements,
+        .pop_last = true,
         .emit_to_scratch = self.emit_to_scratch,
     });
 
     try self.emit(.jmp, &[_]u32{eval_start});
 
-    self.overwrite_jmp_pos(jn_pos, self.get_current_ins_ptr());
-    try self.emit(.lnull, &[_]u32{});
+    const exit_pos = self.get_current_ins_ptr();
+    self.overwrite_jmp_pos(jn_pos, exit_pos);
+    try self.emit(.leave_scope, &[_]u32{num_locals});
+    for (0..self.break_locations.items.len - break_start) |_| {
+        const val = self.break_locations.pop();
+        self.overwrite_jmp_pos(val, exit_pos);
+    }
+    // try self.emit(.lnull, &[_]u32{});
     try self.emit(.pop, &[_]u32{});
 }
 
@@ -321,6 +442,14 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     std.debug.assert(block_node_tag == .BLOCK);
     const block_node_data = ast.nodes.items(.node_data)[block_node];
     const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+    const num_locals = ast.extra_data[ast_node.node_data.rhs + 1];
+
+    try self.scope_stack.append(CompileScope{
+        .type = .function,
+        .num_locals = num_locals,
+    });
+    defer _ = self.scope_stack.pop();
+
     try self.compile_block_statements(
         ast,
         .{
@@ -332,7 +461,6 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     if (self.last_statement != .RETURN_STATEMENT) {
         try self.emit(.op_return, &[_]u32{});
     }
-    const num_locals = ast.extra_data[ast_node.node_data.rhs + 1];
     const const_id = try self.memory.register_function(self.scratch_pad.items[start..], @intCast(num_locals));
     self.scratch_pad.shrinkRetainingCapacity(start);
     _ = self.scratch_ptrs.pop();
@@ -385,12 +513,22 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             const block_node_data = ast.nodes.items(.node_data)[ast_node.node_data.rhs];
             const statements = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+
+            const num_locals = statements[statements.len - 1];
+            try self.scope_stack.append(CompileScope{
+                .type = .block,
+                .num_locals = num_locals,
+            });
+            defer _ = self.scope_stack.pop();
+
+            try self.emit(.enter_scope, &[_]u32{num_locals});
+
             try self.compile_block_statements(ast, .{
                 .statements = statements[0 .. statements.len - 1],
                 .pop_last = false,
                 .emit_to_scratch = self.emit_to_scratch,
             });
-
+            try self.emit(.leave_scope, &[_]u32{num_locals});
             const jmp_pos = self.get_current_ins_ptr();
             try self.emit(.jmp, &[_]u32{9090});
 
@@ -407,11 +545,22 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[0]];
             const statements_if = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+
+            const num_locals_if = statements_if[statements_if.len - 1];
+            try self.scope_stack.append(CompileScope{
+                .type = .block,
+                .num_locals = num_locals_if,
+            });
+
+            try self.emit(.enter_scope, &[_]u32{num_locals_if});
+
             try self.compile_block_statements(ast, .{
                 .statements = statements_if[0 .. statements_if.len - 1],
                 .pop_last = false,
                 .emit_to_scratch = self.emit_to_scratch,
             });
+            try self.emit(.leave_scope, &[_]u32{num_locals_if});
+            _ = self.scope_stack.pop();
 
             const jmp_pos = self.get_current_ins_ptr();
             try self.emit(.jmp, &[_]u32{9090});
@@ -422,12 +571,22 @@ fn emit_if_expression(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Erro
             std.debug.assert(block_node_tag == .BLOCK);
             block_node_data = ast.nodes.items(.node_data)[blocks[1]];
             const statements_else = ast.extra_data[block_node_data.lhs..block_node_data.rhs];
+            const num_locals_else = statements_else[statements_else.len - 1];
+            try self.scope_stack.append(CompileScope{
+                .type = .block,
+                .num_locals = num_locals_else,
+            });
+
+            try self.emit(.enter_scope, &[_]u32{num_locals_else});
 
             try self.compile_block_statements(ast, .{
                 .statements = statements_else[0 .. statements_else.len - 1],
                 .pop_last = false,
                 .emit_to_scratch = self.emit_to_scratch,
             });
+
+            try self.emit(.leave_scope, &[_]u32{num_locals_else});
+            _ = self.scope_stack.pop();
 
             self.overwrite_jmp_pos(jmp_pos, self.get_current_ins_ptr());
         },
@@ -611,7 +770,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "if (1 < 2) { 10; } else { 50; 60;}",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7, 14, 20, 0, 0, 0, 0, 2, 0, 13, 23, 0, 0, 0, 0, 3, 0, 18 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 0, 1, 0, 7, 14, 26, 0, 0, 0, 27, 0, 0, 0, 2, 0, 28, 0, 0, 13, 35, 0, 0, 0, 27, 0, 0, 0, 3, 0, 28, 0, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -628,7 +787,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "if (true) { 10; }",
-            .expected_instructions = &[_]u8{ 11, 14, 14, 0, 0, 0, 0, 0, 0, 13, 15, 0, 0, 0, 15, 18 },
+            .expected_instructions = &[_]u8{ 11, 14, 20, 0, 0, 0, 27, 0, 0, 0, 0, 0, 28, 0, 0, 13, 21, 0, 0, 0, 15, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
             },
@@ -652,7 +811,7 @@ test "test_arithmatic_compile" {
         },
         .{
             .source = "var i = 0; while (i < 5) { i = i + 1}",
-            .expected_instructions = &[_]u8{ 0, 0, 0, 16, 0, 0, 0, 1, 0, 17, 0, 0, 7, 14, 33, 0, 0, 0, 17, 0, 0, 0, 2, 0, 1, 16, 0, 0, 13, 6, 0, 0, 0, 15, 18 },
+            .expected_instructions = &[_]u8{ 0, 0, 0, 16, 0, 0, 27, 0, 0, 0, 1, 0, 17, 0, 0, 7, 14, 36, 0, 0, 0, 17, 0, 0, 0, 2, 0, 1, 16, 0, 0, 13, 9, 0, 0, 0, 28, 0, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -670,109 +829,109 @@ test "test_arithmatic_compile" {
     try test_compiler(&tests);
 }
 
-// test "compile function" {
-//     const tests = [_]CompilerTest{
-//         .{
-//             .source = "fn() { 5 + 10 }",
-//             .expected_instructions = &[_]u8{ 0, 2, 0, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
-//         },
-//         .{
-//             .source = "fn() { return 5 + 10 }",
-//             .expected_instructions = &[_]u8{ 0, 2, 0, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
-//         },
-//         .{
-//             .source = "fn() { return fn() { 5 + 10} }",
-//             .expected_instructions = &[_]u8{ 0, 3, 0, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//                 .{ .function = .{ .ptr = 8, .len = 4 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24, 0, 2, 0, 24 },
-//         },
-//     };
-//     try test_compiler(&tests);
-// }
-//
-// test "compile function calls" {
-//     const tests = [_]CompilerTest{
-//         .{
-//             .source = "fn() { 5 + 10 }()",
-//             .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
-//         },
-//         .{
-//             .source = "fn() { return 5 + 10 }()",
-//             .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
-//         },
-//         .{
-//             .source = "var a = fn() { return 5 + 10 }; a()",
-//             .expected_instructions = &[_]u8{ 0, 2, 0, 16, 0, 0, 17, 0, 0, 23, 18 },
-//             .expected_constant_tags = &[_]MemoryTypes{
-//                 .integer,
-//                 .integer,
-//                 .compiled_function,
-//             },
-//             .expected_data = &[_]Memory.MemoryObject.ObjectData{
-//                 .{ .integer = 5 },
-//                 .{ .integer = 10 },
-//                 .{ .function = .{ .ptr = 0, .len = 8 } },
-//             },
-//             .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
-//         },
-//     };
-//     try test_compiler(&tests);
-// }
+test "compile function" {
+    const tests = [_]CompilerTest{
+        .{
+            .source = "fn() { 5 + 10 }",
+            .expected_instructions = &[_]u8{ 0, 2, 0, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
+        },
+        .{
+            .source = "fn() { return 5 + 10 }",
+            .expected_instructions = &[_]u8{ 0, 2, 0, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
+        },
+        .{
+            .source = "fn() { return fn() { 5 + 10} }",
+            .expected_instructions = &[_]u8{ 0, 3, 0, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+                .{ .function = .{ .ptr = 8, .len = 4, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24, 0, 2, 0, 24 },
+        },
+    };
+    try test_compiler(&tests);
+}
+
+test "compile function calls" {
+    const tests = [_]CompilerTest{
+        .{
+            .source = "fn() { 5 + 10 }()",
+            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
+        },
+        .{
+            .source = "fn() { return 5 + 10 }()",
+            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
+        },
+        .{
+            .source = "var a = fn() { return 5 + 10 }; a()",
+            .expected_instructions = &[_]u8{ 0, 2, 0, 16, 0, 0, 17, 0, 0, 23, 18 },
+            .expected_constant_tags = &[_]MemoryTypes{
+                .integer,
+                .integer,
+                .compiled_function,
+            },
+            .expected_data = &[_]Memory.MemoryObject.ObjectData{
+                .{ .integer = 5 },
+                .{ .integer = 10 },
+                .{ .function = .{ .ptr = 0, .len = 8, .num_locals = 0 } },
+            },
+            .expected_function = &[_]u8{ 0, 0, 0, 0, 1, 0, 1, 24 },
+        },
+    };
+    try test_compiler(&tests);
+}
 
 fn test_compiler(tests: []const CompilerTest) !void {
     for (tests) |t| {
