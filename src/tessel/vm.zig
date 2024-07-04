@@ -164,7 +164,7 @@ pub fn run(self: *VM) !void {
                 self.memory.stack_ptr += num_locals;
             },
             .leave_scope => esc: {
-                const stack_ptr = self.memory.stack_ptr;
+                var stack_ptr = self.memory.stack_ptr;
                 const num_locals = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
                 self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
@@ -193,8 +193,11 @@ pub fn run(self: *VM) !void {
                 }
                 return_value.tag = .stack;
 
+                stack_ptr = self.memory.stack_ptr;
                 var tag_memory_slice = self.memory.memory.slice().items(.tag);
                 for (0..frame.num_locals) |i| {
+                    // std.debug.print("Deleting a local at : {d}\n", .{stack_ptr - 1 - i});
+                    // std.debug.print("At stack_ptr - i: {any}\n", .{self.memory.get(@intCast(stack_ptr - 1 - i))});
                     tag_memory_slice[stack_ptr - 1 - i] = .stack;
                 }
                 self.memory.stack_ptr -= frame.num_locals;

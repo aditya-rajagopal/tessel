@@ -701,7 +701,7 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
     var memory_slice = self.memory.slice();
     if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
         const tag = memory_slice.items(.tag)[self.stack_ptr];
-        if (tag != .constant and tag != .heap)
+        if (tag != .constant and tag != .heap and tag != .local)
             self.destroy(self.stack_ptr);
     }
 
