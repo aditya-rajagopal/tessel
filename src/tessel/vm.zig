@@ -1,5 +1,7 @@
 pub const VM = @This();
 
+// TODO: Try out register based VM
+
 memory: Memory,
 allocator: Allocator,
 frame_starts: std.ArrayList(Memory.MemoryAddress),
@@ -704,6 +706,7 @@ test "evaluate_string_expressions" {
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b;", .expected = "foobar" },
         .{ .source = "const a = \"foo\"; a == \"foo\";", .expected = "true" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a == b;", .expected = "false" },
+        .{ .source = "var a = \"foo\"; const b = \"bar\"; a = a + b; a;", .expected = "foobar" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a != b;", .expected = "true" },
         .{ .source = "const a = \"foo\"; const b = \"bar\"; a + \"\" + b == \"foobar\";", .expected = "true" },
         .{ .source = "const a = \"foobar\"; a[0];", .expected = "f" },
@@ -742,6 +745,37 @@ test "evaluate_while_loops" {
         .{ .source = "var a = 0; while (a < 10) { const b = 1; a = a + b; } a", .expected = "10" },
         .{ .source = "var a = 0; while (a < 10) { if (a == 5) { break; }; const b = 1; a = a + b; } a", .expected = "5" },
         .{ .source = "var a = 0; while (a < 10) { if (a == 5) { a = 20; continue; }; const b = 1; a = a + b; } a", .expected = "20" },
+        .{
+            .source =
+            \\var a = "";
+            \\var i = 0;
+            \\if (i < 5) {
+            \\  const b = "local ";
+            \\  a = a + b;
+            \\  i = i + 1;
+            \\}
+            \\a
+            ,
+            .expected = "local ",
+        },
+        .{
+            .source =
+            \\var a = "";
+            \\var i = 0;
+            \\while (i < 5) {
+            \\  if (i == 2) {
+            \\      a = a + "two ";
+            \\      i = i + 1;
+            \\      continue;
+            \\  };
+            \\  const b = "local ";
+            \\  a = a + b;
+            \\  i = i + 1;
+            \\}
+            \\a
+            ,
+            .expected = "local local two local local ",
+        },
         // .{
         //     .source =
         //     \\  const fn_call = fn(x) {
@@ -802,6 +836,7 @@ test "run_arrays" {
         .{ .source = "[1, \"two\", 3][1]", .expected = "two" },
         .{ .source = "const a = [1, 2, 3]; a;", .expected = "[1, 2, 3, ]" },
         .{ .source = "const a = [1, \"two\", 3]; a;", .expected = "[1, two, 3, ]" },
+        .{ .source = "var a = [1, \"two\", 3]; a = 3; a;", .expected = "3" },
         .{ .source = "const a = [1, [1, 2], 3]; a[1];", .expected = "[1, 2, ]" },
         .{ .source = "const a = [1, [1, 2], 3]; a[1][0];", .expected = "1" },
         .{ .source = "const a = [1, [1, 2], [[3, 4], [5, 6]]]; a[2][1][0];", .expected = "5" },
@@ -868,10 +903,10 @@ test "evaluate_identifiers" {
         },
         .{ .source = "const a = \"three\"; const b = a; b;", .expected = "three" },
         .{ .source = "const str = \"three\"; const a = [1, 2, str]; const b = a; b;", .expected = "[1, 2, three, ]" },
-        // .{
-        //     .source = "var a = 2 * 2; const b = a + 3; const c = if ( a < b ) { return a + 5; } else { return true; }; c; ",
-        //     .expected = "9",
-        // },
+        .{
+            .source = "var a = 2 * 2; const b = a + 3; const c = if ( a < b ) { a + 5; } else { true; }; c; ",
+            .expected = "9",
+        },
     };
 
     try run_vm_tests(&tests, false);

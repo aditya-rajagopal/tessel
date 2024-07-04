@@ -520,11 +520,7 @@ pub fn set_global(self: *Memory, id: GlobalID) Error!void {
 
     if (ptr > reserved_objects) {
         const tag = memory_slice.items(.tag)[ptr];
-        if (tag != .constant and tag != .heap) {
-            // switch (memory_slice.items(.dtype)[ptr]) {
-            //     .string, .array => self.destroy(ptr),
-            //     else => {},
-            // }
+        if (tag != .constant) {
             self.destroy(ptr);
         }
     }
@@ -705,7 +701,7 @@ pub fn stack_push(self: *Memory, element: MemoryObject) MemoryError!void {
     var memory_slice = self.memory.slice();
     if (memory_slice.items(.dtype)[self.stack_ptr] != .null) {
         const tag = memory_slice.items(.tag)[self.stack_ptr];
-        if (tag != .constant and tag != .heap and tag != .local)
+        if (tag != .constant and tag != .heap)
             self.destroy(self.stack_ptr);
     }
 
