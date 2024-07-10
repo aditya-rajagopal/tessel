@@ -1,4 +1,5 @@
 pub const Compiler = @This();
+// TODO: If a scope has 0 local variables then pretend there is no new scope removing the need for enter and leave scope
 // TODO: Repl is broken somehow. It prints wrong outputs
 // TODO: Deal with function parameters.
 // TODO: Closures
@@ -423,8 +424,17 @@ fn compile_function_call(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) E
     // the argument expressions nodes are in extra_data[rhs..rhs+2]
     const state = self.emit_to_scratch;
     try self.compile_expression(ast, ast_node.node_data.lhs);
+    var num_arguments: u32 = 0;
+    if (ast_node.node_data.rhs != 0) {
+        const expressions_range = ast.extra_data[ast_node.node_data.rhs .. ast_node.node_data.rhs + 2];
+        const expressions = ast.extra_data[expressions_range[0]..expressions_range[1]];
+        num_arguments = @intCast(expressions.len);
+        for (expressions) |e| {
+            try self.compile_expression(ast, e);
+        }
+    }
     self.emit_to_scratch = state;
-    try self.emit(.call, &[_]u32{});
+    try self.emit(.call, &[_]u32{num_arguments});
 }
 
 fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!void {
@@ -436,6 +446,11 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     const start = self.scratch_pad.items.len;
 
     try self.scratch_ptrs.append(start);
+    var num_parameters: u8 = 0;
+    if (ast_node.node_data.lhs != 0) {
+        const parameters = ast.nodes.get(ast_node.node_data.lhs);
+        num_parameters = @intCast(parameters.node_data.rhs - parameters.node_data.lhs);
+    }
 
     const block_node = ast.extra_data[ast_node.node_data.rhs];
     const block_node_tag = ast.nodes.items(.tag)[block_node];
@@ -446,7 +461,7 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
 
     try self.scope_stack.append(CompileScope{
         .type = .function,
-        .num_locals = num_locals,
+        .num_locals = num_locals + num_parameters,
     });
     defer _ = self.scope_stack.pop();
 
@@ -461,7 +476,11 @@ fn compile_function(self: *Compiler, ast: *const Ast, ast_node: Ast.Node) Error!
     if (self.last_statement != .RETURN_STATEMENT) {
         try self.emit(.op_return, &[_]u32{});
     }
-    const const_id = try self.memory.register_function(self.scratch_pad.items[start..], @intCast(num_locals));
+    const const_id = try self.memory.register_function(
+        self.scratch_pad.items[start..],
+        @intCast(num_locals),
+        @intCast(num_parameters),
+    );
     self.scratch_pad.shrinkRetainingCapacity(start);
     _ = self.scratch_ptrs.pop();
     self.emit_to_scratch = state;
@@ -886,7 +905,7 @@ test "compile function calls" {
     const tests = [_]CompilerTest{
         .{
             .source = "fn() { 5 + 10 }()",
-            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
+            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -901,7 +920,7 @@ test "compile function calls" {
         },
         .{
             .source = "fn() { return 5 + 10 }()",
-            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 18 },
+            .expected_instructions = &[_]u8{ 0, 2, 0, 23, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,
@@ -916,7 +935,7 @@ test "compile function calls" {
         },
         .{
             .source = "var a = fn() { return 5 + 10 }; a()",
-            .expected_instructions = &[_]u8{ 0, 2, 0, 16, 0, 0, 17, 0, 0, 23, 18 },
+            .expected_instructions = &[_]u8{ 0, 2, 0, 16, 0, 0, 17, 0, 0, 23, 0, 18 },
             .expected_constant_tags = &[_]MemoryTypes{
                 .integer,
                 .integer,

@@ -32,6 +32,9 @@ pub fn make(
     for (0..operands.len) |i| {
         const width = def[i];
         switch (width) {
+            1 => {
+                instructions.appendSliceAssumeCapacity(std.mem.asBytes(&@as(u8, @intCast(operands[i]))));
+            },
             2 => {
                 instructions.appendSliceAssumeCapacity(std.mem.asBytes(&@as(u16, @intCast(operands[i]))));
             },
@@ -56,6 +59,10 @@ pub fn read_operands(allocator: Allocator, definition: []const u8, ins: Instruct
             },
             4 => {
                 const value = std.mem.bytesToValue(u32, ins[offset..]);
+                try operands.append(allocator, value);
+            },
+            1 => {
+                const value = std.mem.bytesToValue(u8, ins[offset..]);
                 try operands.append(allocator, value);
             },
             0 => {
@@ -180,7 +187,7 @@ pub const Definitions = std.enums.directEnumArrayDefault(Opcode, []const u8, nul
     .index_into = &[_]u8{0},
     .index_range = &[_]u8{0},
     .make_hash = &[_]u8{2},
-    .call = &[_]u8{0},
+    .call = &[_]u8{1},
     .op_return = &[_]u8{0},
     .set_local = &[_]u8{ 2, 2 },
     .get_local = &[_]u8{ 2, 2 },
@@ -254,7 +261,7 @@ test "make instructions string" {
     try make(&insts, .index_into, &[_]u32{});
     try make(&insts, .index_range, &[_]u32{});
     try make(&insts, .make_hash, &[_]u32{3});
-    try make(&insts, .call, &[_]u32{});
+    try make(&insts, .call, &[_]u32{1});
     try make(&insts, .op_return, &[_]u32{});
     try make(&insts, .set_local, &[_]u32{ 1, 3 });
     try make(&insts, .get_local, &[_]u32{ 1, 3 });
@@ -287,12 +294,12 @@ test "make instructions string" {
         \\0042 index_into
         \\0043 index_range
         \\0044 make_hash 3
-        \\0047 call
-        \\0048 op_return
-        \\0049 set_local 1 3
-        \\0054 get_local 1 3
-        \\0059 enter_scope 2
-        \\0062 leave_scope 2
+        \\0047 call 1
+        \\0049 op_return
+        \\0050 set_local 1 3
+        \\0055 get_local 1 3
+        \\0060 enter_scope 2
+        \\0063 leave_scope 2
         \\
     ;
 

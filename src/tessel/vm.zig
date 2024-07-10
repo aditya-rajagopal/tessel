@@ -80,7 +80,10 @@ pub fn run(self: *VM) !void {
             .index_range => try self.eval_index_range(),
             .make_hash => try self.eval_hash_literal(),
             .call => {
-                const stack_ptr = self.memory.stack_top() orelse return VMError.CallingNonFunction;
+                var stack_ptr = self.memory.stack_top() orelse return VMError.CallingNonFunction;
+                const num_arguments = current_frame.ins[current_frame.ins_ptr + 1];
+                self.memory.stack_frames.inc_current_frame_ins_ptr(1);
+                stack_ptr = stack_ptr - num_arguments;
                 const func = self.memory.memory.get(stack_ptr - 1);
                 if (func.dtype != .compiled_function) {
                     return VMError.CallingNonFunction;
@@ -90,9 +93,9 @@ pub fn run(self: *VM) !void {
                     self.memory.function_storage.items[func.data.function.ptr .. func.data.function.ptr + func.data.function.len],
                     0,
                     stack_ptr,
-                    func.data.function.num_locals,
+                    func.data.function.num_locals + num_arguments,
                 );
-                for (0..func.data.function.num_locals) |i| {
+                for (0..func.data.function.num_locals + num_arguments) |i| {
                     self.memory.memory.items(.tag)[stack_ptr + i] = .local;
                 }
                 self.memory.stack_ptr += func.data.function.num_locals;
@@ -190,14 +193,17 @@ pub fn run(self: *VM) !void {
                     self.memory.memory.items(.dtype)[self.memory.stack_ptr] = .null;
                 } else if (frame_size == frame.num_locals) {
                     return_value = self.memory.get(Memory.null_object);
+                    if (num_locals == 0) {
+                        return_value.tag = .stack;
+                        try self.memory.stack_push(return_value);
+                        break :esc;
+                    }
                 }
                 return_value.tag = .stack;
 
                 stack_ptr = self.memory.stack_ptr;
                 var tag_memory_slice = self.memory.memory.slice().items(.tag);
                 for (0..frame.num_locals) |i| {
-                    // std.debug.print("Deleting a local at : {d}\n", .{stack_ptr - 1 - i});
-                    // std.debug.print("At stack_ptr - i: {any}\n", .{self.memory.get(@intCast(stack_ptr - 1 - i))});
                     tag_memory_slice[stack_ptr - 1 - i] = .stack;
                 }
                 self.memory.stack_ptr -= frame.num_locals;
@@ -801,7 +807,7 @@ test "evaluate_while_loops" {
         // },
     };
 
-    try run_vm_tests(&tests, false);
+    try run_vm_tests(&tests, true);
 }
 
 test "run_prefix_not" {
@@ -917,7 +923,8 @@ test "evaluate_identifiers" {
 
 test "evaluate_function_expressions" {
     const tests = [_]VMTestCase{
-        // .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
+        .{ .source = "const a = fn(x, y) { x + y};", .expected = "null" },
+        .{ .source = "const a = fn(x, y) { x + y}; a(1, 2)", .expected = "3" },
         .{ .source = "fn() { 5 + 10 }()", .expected = "15" },
         .{ .source = "fn() { \"foobar\" }()", .expected = "foobar" },
         .{ .source = "fn() { [\"foo\",\"bar\"] }()", .expected = "[foo, bar, ]" },
@@ -962,9 +969,9 @@ test "evaluate_function_expressions" {
             ,
             .expected = "3",
         },
-        // .{ .source = "fn(x, y) { x + y}(1, 2)", .expected = "3" },
-        // .{ .source = "const a = fn(x, y) { x + y }; a(2, 4);", .expected = "6" },
-        // .{ .source = "const call_fn = fn(x, y) { x(y) }; call_fn(fn(x) { return 2 * x; }, 4);", .expected = "8" },
+        .{ .source = "fn(x, y) { x + y}(1, 2)", .expected = "3" },
+        .{ .source = "const a = fn(x, y) { x + y }; a(2, 4);", .expected = "6" },
+        .{ .source = "const call_fn = fn(x, y) { x(y) }; call_fn(fn(x) { return 2 * x; }, 4);", .expected = "8" },
         // .{
         //     .source = "const fn_call = fn(x) { const b = fn(y) { x + y}; return b; }; const a = fn_call(2); a(3)",
         //     .expected = "5",
@@ -1000,8 +1007,8 @@ test "evaluate_function_expressions" {
         //     ,
         //     .expected = "20",
         // },
-        // .{ .source = "const add = fn(x, y) { return x + y; }; add( 5 * 5, add(5, 5))", .expected = "35" },
-        // .{ .source = "const b = fn() { 10; }; const add = fn(a, b) { a() + b }; add(b, 10);", .expected = "20" },
+        .{ .source = "const add = fn(x, y) { return x + y; }; add( 5 * 5, add(5, 5))", .expected = "35" },
+        .{ .source = "const b = fn() { 10; }; const add = fn(a, b) { a() + b }; add(b, 10);", .expected = "20" },
     };
 
     try run_vm_tests(&tests, false);

@@ -178,8 +178,9 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
 }
 
 pub fn create(self: *Memory, location: MemoryAddress, dtype: Types, data: *const anyopaque) !void {
-    const memory_data: *MemoryObject.ObjectData = &self.memory.items(.data)[location];
-    const memory_dtype: *Types = &self.memory.items(.dtype)[location];
+    var memory_slice = self.memory.slice();
+    const memory_data: *MemoryObject.ObjectData = &memory_slice.items(.data)[location];
+    const memory_dtype: *Types = &memory_slice.items(.dtype)[location];
     switch (dtype) {
         .integer => {
             const value: *const i64 = @ptrCast(@alignCast(data));
@@ -331,7 +332,9 @@ pub fn dupe_locals(self: *Memory, from: MemoryAddress, to: MemoryAddress) !void 
     const data = self.get(from);
     switch (data.dtype) {
         .integer => {
-            try self.create(to, .integer, @ptrCast(&data.data.integer));
+            if (from != to) {
+                try self.create(to, .integer, @ptrCast(&data.data.integer));
+            }
         },
         .string => {
             var output = try data.data.string_type.clone(self.allocator);
@@ -454,12 +457,13 @@ fn destroy(self: *Memory, ptr: MemoryAddress) void {
     memory_slice.items(.data)[ptr].integer = 0;
 }
 
-pub fn register_function(self: *Memory, instructions: []const u8, num_locals: u16) !ConstantID {
+pub fn register_function(self: *Memory, instructions: []const u8, num_locals: u8, num_arguments: u8) !ConstantID {
     const function_location = self.function_storage.items.len;
     try self.function_storage.appendSlice(instructions);
     const func_data = MemoryObject.FunctionData{
-        .ptr = @intCast(function_location),
         .num_locals = num_locals,
+        .num_arguments = num_arguments,
+        .ptr = @intCast(function_location),
         .len = @intCast(instructions.len),
     };
     return self.register_constant(.compiled_function, @ptrCast(&func_data));
@@ -787,8 +791,9 @@ pub const MemoryObject = struct {
     };
 
     pub const FunctionData = extern struct {
+        num_locals: u8,
+        num_arguments: u8 = 0,
         ptr: FunctionAddress,
-        num_locals: u16,
         len: u32,
     };
 

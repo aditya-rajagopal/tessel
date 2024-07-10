@@ -1,4 +1,5 @@
 pub const Parser = @This();
+// TODO: If a scope has 0 local variables then pretend there is no new scope removing the need for enter and leave scope
 
 /// The parser holds a reference to the source code to reference in case of errors
 source_buffer: [:0]const u8,
