@@ -113,17 +113,17 @@ This implies that there are many aspects of the language that are in an incomple
 The language is inspired by python with some interesting things added mostly to explore how they might be implemented in a language
 
 General rules:
-    - Lines end in a ';'
-    - Variables declared with const cannot be mutated and will raise an error during compilation
-    - identifiers cannot be redeclared in the same scope
-    - There is only a while loop for now. More can be added later.
-        - There are break; and continue; statements to mutate loops
-    - Comments start with a '//'
-    - Functions using variables from parent scopes will have the value of the variable stored int he stack frame allowing closures
-    - Scopes are defined with { }. Brackets must match.
-    - Conditions for while and if-else blocks must be enclosed in ( )
-    - Arrays are defined within [ ]
-    - Hasmaps are defined with { }. These are similar to python dictionaries. 
+- Lines end in a ';'
+- Variables declared with const cannot be mutated and will raise an error during compilation
+- identifiers cannot be redeclared in the same scope
+- There is only a while loop for now. More can be added later.
+    - There are break; and continue; statements to mutate loops
+- Comments start with a '//'
+- Functions using variables from parent scopes will have the value of the variable stored int he stack frame allowing closures
+- Scopes are defined with { }. Brackets must match.
+- Conditions for while and if-else blocks must be enclosed in ( )
+- Arrays are defined within [ ]
+- Hasmaps are defined with { }. These are similar to python dictionaries. 
 
 Please look at the test cases described in the Tests section to see many more example usage. 
 
