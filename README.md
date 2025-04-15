@@ -102,11 +102,11 @@ NOTE: the command python must exist in your machine for this to exist.
 Currently the language is in a transition state from a AST-evaluator approach to exectuing the code to the AST compiled into bytecode and run in a VM.
 This implies that there are many aspects of the language that are in an incomplete state and I will come back to them when i come back to exploring languages
 
--[ ] Transition builtins to the bytecode interpreter
--[ ] Add supports for floats.
--[ ] Add more builtins especially for range, enumerate and file IO.
--[ ] Add support for structures and appending functions to them. Not classes more akin to GO.
--[ ] Complete transition of all properties of function. Currently currying and closures are not 100% working as intended.
+- [ ] Transition builtins to the bytecode interpreter
+- [ ] Add supports for floats.
+- [ ] Add more builtins especially for range, enumerate and file IO.
+- [ ] Add support for structures and appending functions to them. Not classes more akin to GO.
+- [ ] Complete transition of all properties of function. Currently currying and closures are not 100% working as intended.
 
 # Language
 
