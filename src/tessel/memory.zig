@@ -85,30 +85,30 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) Allocator.Error!Memory 
     }
 
     // 0 will always be a null node and will be referenced when .null is needed
-    const null_loc = pool.free_list.popOrNull() orelse unreachable;
+    const null_loc = pool.free_list.pop() orelse unreachable;
     tag_slice[null_loc] = .reserved;
     ref_slice[null_loc] = 0;
 
     // 1 will be the true node and again will be referenced
-    const true_loc = pool.free_list.popOrNull() orelse unreachable;
+    const true_loc = pool.free_list.pop() orelse unreachable;
     tag_slice[true_loc] = .reserved;
     dtype_slice[true_loc] = .boolean;
     data_slice[true_loc].boolean = true;
     ref_slice[true_loc] = 0;
 
     // 2 will be the false node and again will be referenced
-    const false_loc = pool.free_list.popOrNull() orelse unreachable;
+    const false_loc = pool.free_list.pop() orelse unreachable;
     tag_slice[false_loc] = .reserved;
     dtype_slice[false_loc] = .boolean;
     data_slice[false_loc].boolean = false;
     ref_slice[false_loc] = 0;
 
-    const break_loc = pool.free_list.popOrNull() orelse unreachable;
+    const break_loc = pool.free_list.pop() orelse unreachable;
     tag_slice[break_loc] = .reserved;
     dtype_slice[break_loc] = .break_statement;
     ref_slice[break_loc] = 0;
 
-    const continue_loc = pool.free_list.popOrNull() orelse unreachable;
+    const continue_loc = pool.free_list.pop() orelse unreachable;
     tag_slice[continue_loc] = .reserved;
     dtype_slice[continue_loc] = .continue_statement;
     ref_slice[continue_loc] = 0;
@@ -167,7 +167,7 @@ pub fn alloc(self: *Memory, dtype: Types, data: *const anyopaque) !MemoryAddress
             if (self.free_list.items.len == 0) {
                 location = @as(MemoryAddress, @intCast(try self.memory.addOne(self.allocator)));
             } else {
-                location = self.free_list.popOrNull() orelse unreachable;
+                location = self.free_list.pop() orelse unreachable;
             }
             try self.create(location, dtype, data);
 
@@ -1115,15 +1115,15 @@ test "Memory init" {
 }
 
 test "sizes" {
-    std.debug.print("Size of Memory Object: {}\n", .{@sizeOf(MemoryObject)});
-    std.debug.print("Size of Object Data: {}\n", .{@sizeOf(MemoryObject.ObjectData)});
-    std.debug.print("Size of Object Tag: {}\n", .{@sizeOf(MemoryObject.Tag)});
-    std.debug.print("Size of FunctionData: {}\n", .{@sizeOf(MemoryObject.FunctionData)});
-    std.debug.print("Size of HashData: {}\n", .{@sizeOf(*MemoryObject.HashData)});
-    std.debug.print("Size of StringType: {}\n", .{@sizeOf(MemoryObject.StringType)});
-    std.debug.print("Size of ArrayType: {}\n", .{@sizeOf(MemoryObject.ArrayType)});
-    std.debug.print("Size of String: {}\n", .{@sizeOf(MemoryObject.String)});
-    std.debug.print("Size of Array: {}\n", .{@sizeOf(MemoryObject.Array)});
+    // std.debug.print("Size of Memory Object: {}\n", .{@sizeOf(MemoryObject)});
+    // std.debug.print("Size of Object Data: {}\n", .{@sizeOf(MemoryObject.ObjectData)});
+    // std.debug.print("Size of Object Tag: {}\n", .{@sizeOf(MemoryObject.Tag)});
+    // std.debug.print("Size of FunctionData: {}\n", .{@sizeOf(MemoryObject.FunctionData)});
+    // std.debug.print("Size of HashData: {}\n", .{@sizeOf(*MemoryObject.HashData)});
+    // std.debug.print("Size of StringType: {}\n", .{@sizeOf(MemoryObject.StringType)});
+    // std.debug.print("Size of ArrayType: {}\n", .{@sizeOf(MemoryObject.ArrayType)});
+    // std.debug.print("Size of String: {}\n", .{@sizeOf(MemoryObject.String)});
+    // std.debug.print("Size of Array: {}\n", .{@sizeOf(MemoryObject.Array)});
 }
 
 const std = @import("std");

@@ -54,7 +54,7 @@ pub const TokenType = enum {
 };
 
 /// Map of all valid keywords in tessel created at compiletime
-pub const Keywords = std.ComptimeStringMap(TokenType, .{
+pub const Keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "fn", .FUNCTION },
     .{ "const", .CONST },
     .{ "var", .VAR },

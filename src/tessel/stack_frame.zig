@@ -46,7 +46,14 @@ pub fn pop(self: *StackFrame) StackFrameError!void {
         return StackFrameError.PoppingEmptyStackFrame;
     }
     self.frame_ptr -= 1;
-    // self.stack_frames.shrinkRetainingCapacity(self.frame_ptr);
+    self.stack_frames.shrinkRetainingCapacity(self.frame_ptr);
+}
+
+pub fn pop_no_shrink(self: *StackFrame) StackFrameError!void {
+    if (self.frame_ptr == 0) {
+        return StackFrameError.PoppingEmptyStackFrame;
+    }
+    self.frame_ptr -= 1;
 }
 
 pub fn current_frame(self: *StackFrame) Frame {

@@ -38,7 +38,7 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !EnvironmentPool {
     }
 
     // 0 will always be a null node and will be referenced when .null is needed
-    const global = pool.free_list.popOrNull() orelse unreachable;
+    const global = pool.free_list.pop() orelse unreachable;
     pool.environment_pool.items(.tag)[global] = .global;
     pool.environment_pool.items(.data)[global] = try Environment.Create(allocator);
     return pool;
@@ -83,7 +83,7 @@ pub fn create_env(self: *EnvironmentPool, allocator: Allocator, parent_loc: Envi
             .child_nodes = .{},
         });
     } else {
-        location = self.free_list.popOrNull() orelse unreachable;
+        location = self.free_list.pop() orelse unreachable;
         self.environment_pool.items(.tag)[location] = .inuse;
         self.environment_pool.items(.child_nodes)[location] = .{};
         if (self.environment_pool.items(.data)[location]) |env| {

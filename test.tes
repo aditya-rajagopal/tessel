@@ -9,4 +9,6 @@ const fibonacci = fn(x) {
         }
     }
 }
-fibonacci(30);
+
+const result = fibonacci(35);
+result;

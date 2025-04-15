@@ -244,6 +244,8 @@ fn parse_expression_statement(self: *Parser) Error!Ast.Node.NodeIndex {
 fn maybe_parse_assign_statement(self: *Parser) Error!Ast.Node.NodeIndex {
     std.debug.assert(self.is_current_token(.IDENT));
     const next_tok = self.peek_next_token_tag() orelse {
+        // NOTE(adi): If next token is not available then this is the last line of the code with just the identifier
+        // must be just an expression
         return self.parse_expression_statement();
     };
     // TODO: Add .COMMA here and have multi variable assignment

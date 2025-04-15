@@ -1,5 +1,5 @@
 pub const VM = @This();
-
+// TODO: If a scope has 0 local variables then pretend there is no new scope removing the need for enter and leave scope
 // TODO: Try out register based VM
 
 memory: Memory,
@@ -39,8 +39,6 @@ pub fn run(self: *VM) !void {
         0,
         0,
     );
-
-    // var self.memory.ins_ptr: usize = @intCast(start_index);
 
     while (self.memory.stack_frames.current_frame().ins_ptr < self.memory.stack_frames.current_frame().ins.len) {
         const current_frame = self.memory.stack_frames.current_frame();
@@ -104,23 +102,27 @@ pub fn run(self: *VM) !void {
             },
             .op_return => esc: {
                 var stack_ptr = self.memory.stack_top() orelse unreachable;
-                try self.memory.stack_frames.pop();
+                var memory_slice = self.memory.memory.slice();
+                const tag_array = memory_slice.items(.tag);
+                const data_array = memory_slice.items(.data);
+                const dtype_array = memory_slice.items(.dtype);
+
+                try self.memory.stack_frames.pop_no_shrink();
                 defer self.memory.stack_frames.stack_frames.shrinkRetainingCapacity(self.memory.stack_frames.frame_ptr);
 
                 const frame = self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr];
                 const frame_size = stack_ptr - frame.stack_start;
 
-                var stack_top_tag = self.memory.get(stack_ptr - 1).tag;
-                var return_value: Memory.MemoryObject = undefined;
-                if (frame_size == frame.num_locals) {
-                    return_value = self.memory.get(Memory.null_object);
-                } else {
+                var return_value: Memory.MemoryObject = memory_slice.get(Memory.null_object);
+
+                if (frame_size != frame.num_locals) {
+                    const stack_top_tag = tag_array[stack_ptr - 1];
                     if (stack_top_tag == .constant or stack_top_tag == .heap or stack_top_tag == .local) {
                         try self.memory.dupe_locals(stack_ptr - 1, stack_ptr - 1);
                     }
                     return_value = try self.memory.stack_pop();
-                    self.memory.memory.items(.data)[self.memory.stack_ptr].integer = 0;
-                    self.memory.memory.items(.dtype)[self.memory.stack_ptr] = .null;
+                    data_array[self.memory.stack_ptr].integer = 0;
+                    dtype_array[self.memory.stack_ptr] = .null;
                 }
                 return_value.tag = .stack;
 
@@ -129,16 +131,14 @@ pub fn run(self: *VM) !void {
                     break :esc;
                 };
 
-                stack_top_tag = self.memory.get(stack_ptr - 1).tag;
-                if (stack_top_tag == .local) {
-                    var tag_memory_slice = self.memory.memory.slice().items(.tag);
+                if (tag_array[stack_ptr - 1] == .local) {
                     for (0..frame.num_locals) |i| {
-                        tag_memory_slice[stack_ptr - 1 - i] = .stack;
+                        tag_array[stack_ptr - 1 - i] = .stack;
                     }
                     self.memory.stack_ptr -= frame.num_locals;
                 }
 
-                const stack_top_dtype = self.memory.get(self.memory.stack_ptr - 1).dtype;
+                const stack_top_dtype = dtype_array[self.memory.stack_ptr - 1];
                 if (stack_top_dtype != .compiled_function) {
                     try self.memory.stack_push(self.memory.get(Memory.null_object));
                     break :esc;
@@ -171,7 +171,7 @@ pub fn run(self: *VM) !void {
                 const num_locals = std.mem.bytesToValue(u16, current_frame.ins[current_frame.ins_ptr + 1 ..]);
                 self.memory.stack_frames.inc_current_frame_ins_ptr(2);
 
-                try self.memory.stack_frames.pop();
+                try self.memory.stack_frames.pop_no_shrink();
                 defer self.memory.stack_frames.stack_frames.shrinkRetainingCapacity(self.memory.stack_frames.frame_ptr);
 
                 const frame = self.memory.stack_frames.stack_frames.items[self.memory.stack_frames.frame_ptr];
@@ -807,7 +807,7 @@ test "evaluate_while_loops" {
         // },
     };
 
-    try run_vm_tests(&tests, true);
+    try run_vm_tests(&tests, false);
 }
 
 test "run_prefix_not" {
@@ -1013,6 +1013,7 @@ test "evaluate_function_expressions" {
 
     try run_vm_tests(&tests, false);
 }
+
 fn run_vm_tests(tests: []const VMTestCase, debug_print: bool) !void {
     var buffer: [2048]u8 = undefined;
     for (tests) |t| {

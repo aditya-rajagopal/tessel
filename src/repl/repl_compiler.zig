@@ -38,6 +38,7 @@ pub fn start() !void {
     defer vm.deinit();
 
     while (true) {
+        // TODO: Support multi line code input
         try stdout.print("{s}", .{PROMT});
         try bw.flush();
 
@@ -53,7 +54,7 @@ pub fn start() !void {
                 try bw.flush();
                 break;
             }
-            _ = source_buffer.popOrNull();
+            _ = source_buffer.pop();
             try source_buffer.appendSlice(m);
             try source_buffer.append('\n');
             try source_buffer.append(0);
@@ -83,19 +84,19 @@ pub fn start() !void {
             defer allocator.free(out2);
 
             try stdout.print("Instructions:\n", .{});
-            try stdout.print("\t{s}\n", .{out});
+            try stdout.print("{s}\n\n", .{out});
             try stdout.print("Functions:\n", .{});
-            try stdout.print("\t{s}\n", .{out2});
+            try stdout.print("{s}\n\n", .{out2});
             try bw.flush();
 
             try vm.run();
 
-            try stdout.print("{d}\n", .{vm.memory.instructions.items});
+            try stdout.print("Instructions bytes: {d}\n", .{vm.memory.instructions.items});
 
             const sptr = vm.memory.stack_top() orelse 0;
             const object = vm.memory.memory.get(sptr);
-            std.debug.print("Instruction pointer: {d}\n", .{vm.memory.ins_ptr});
-            std.debug.print("Stack Ptr: {d}\n", .{sptr});
+            try stdout.print("Instruction pointer: {d}\n", .{vm.memory.ins_ptr});
+            try stdout.print("Stack Ptr: {d}\n", .{sptr});
 
             const outstr = try vm.memory.ObjectToString(object, &buffer);
             try stdout.print("Output >> {s}\n", .{outstr});

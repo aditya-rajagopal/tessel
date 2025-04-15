@@ -9,16 +9,16 @@ get_keys: ObjectPool.BuiltInFn,
 print: ObjectPool.BuiltInFn,
 
 pub const default = Builtins{
-    .len = Builtins.len,
-    .str = Builtins.str,
-    .int = Builtins.int,
-    .append = Builtins.append,
-    .pop = Builtins.pop,
-    .get_keys = Builtins.get_keys,
-    .print = Builtins.print,
+    .len = Builtins.len_raw,
+    .str = Builtins.str_raw,
+    .int = Builtins.int_raw,
+    .append = Builtins.append_raw,
+    .pop = Builtins.pop_raw,
+    .get_keys = Builtins.get_keys_raw,
+    .print = Builtins.print_raw,
 };
 
-fn len(
+fn len_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -68,7 +68,7 @@ fn len(
     return null_object;
 }
 
-fn str(
+fn str_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -118,7 +118,7 @@ fn str(
     return null_object;
 }
 
-fn int(
+fn int_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -177,7 +177,7 @@ fn int(
     return null_object;
 }
 
-fn append(
+fn append_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -221,7 +221,7 @@ fn append(
     return null_object;
 }
 
-fn pop(
+fn pop_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -244,7 +244,7 @@ fn pop(
     const arg_data = eval.object_pool.get_data(objects[0]);
     switch (arg_tag) {
         .array => {
-            const out = arg_data.array.popOrNull() orelse {
+            const out = arg_data.array.pop() orelse {
                 const output = std.fmt.allocPrint(
                     allocator.*,
                     "Attempting to pop from an empty array",
@@ -274,7 +274,7 @@ fn pop(
     return null_object;
 }
 
-fn get_keys(
+fn get_keys_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,
@@ -321,7 +321,7 @@ fn get_keys(
     return return_object;
 }
 
-fn print(
+fn print_raw(
     eval: *Evaluator,
     allocator: *const Allocator,
     objects: [*]const ObjectIndex,

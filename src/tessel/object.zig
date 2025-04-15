@@ -42,18 +42,18 @@ pub fn initCapacity(allocator: Allocator, capacity: u32) !ObjectPool {
     }
 
     // 0 will always be a null node and will be referenced when .null is needed
-    _ = pool.free_list.popOrNull() orelse unreachable;
+    _ = pool.free_list.pop() orelse unreachable;
     // 1 will be the true node and again will be referenced
-    const true_loc = pool.free_list.popOrNull() orelse unreachable;
+    const true_loc = pool.free_list.pop() orelse unreachable;
     pool.object_pool.items(.tag)[true_loc] = .boolean;
     pool.object_pool.items(.data)[true_loc].boolean = true;
     // 2 will be the false node and again will be referenced
-    const false_loc = pool.free_list.popOrNull() orelse unreachable;
+    const false_loc = pool.free_list.pop() orelse unreachable;
     pool.object_pool.items(.tag)[false_loc] = .boolean;
     pool.object_pool.items(.data)[false_loc].boolean = false;
-    const break_loc = pool.free_list.popOrNull() orelse unreachable;
+    const break_loc = pool.free_list.pop() orelse unreachable;
     pool.object_pool.items(.tag)[break_loc] = .break_statement;
-    const continue_loc = pool.free_list.popOrNull() orelse unreachable;
+    const continue_loc = pool.free_list.pop() orelse unreachable;
     pool.object_pool.items(.tag)[continue_loc] = .continue_statement;
     return pool;
 }
@@ -105,7 +105,7 @@ pub fn create(self: *ObjectPool, allocator: Allocator, tag: ObjectTypes, data: *
     if (self.free_list.items.len == 0) {
         location = @as(ObjectIndex, @intCast(try self.object_pool.addOne(allocator)));
     } else {
-        location = self.free_list.popOrNull() orelse unreachable;
+        location = self.free_list.pop() orelse unreachable;
     }
 
     switch (tag) {

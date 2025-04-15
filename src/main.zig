@@ -15,6 +15,7 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
+
     const file_name = args.next() orelse return try repl.start();
     if (file_name.len < 4) {
         std.debug.print("Unkown parameter provided: \"{s}\". Expected a .tes file\n", .{file_name});
@@ -25,38 +26,51 @@ pub fn main() !void {
         return;
     }
 
+    var buffer: [10240]u8 = undefined;
+    var len: usize = 0;
+
     var file = try std.fs.cwd().openFile(file_name, .{});
     defer file.close();
-    var buffer: [10240]u8 = undefined;
-    const out = try file.reader().readAll(&buffer);
-    var out_buffer: [1024]u8 = undefined;
-    buffer[out] = 0;
-    var timer = try std.time.Timer.start();
+
+    const source = try file.readToEndAllocOptions(allocator, 4096 * 1024, 4096 * 8, 1, 0);
 
     var symbol_tree = SymbolTree.init(allocator);
     defer symbol_tree.deinit();
-    var eval = try Evaluator.init(allocator, global_env, &symbol_tree);
 
-    var ast = try Parser.parse_program(buffer[0..out :0], allocator, &symbol_tree);
+    var vm = try VM.init(allocator, false);
+    defer vm.deinit();
+
+    var ast = try Parser.parse_program(source, allocator, &symbol_tree);
     defer ast.deinit(allocator);
 
-    try Parser.print_parser_errors_to_stderr(&ast);
-    const output = try eval.evaluate_program(&ast, 0, allocator, global_env);
+    if (ast.errors.len > 0) {
+        try Parser.print_parser_errors_to_stderr(&ast);
+        return;
+    }
 
-    const outstr = try eval.object_pool.ToString(&out_buffer, output);
-    const end_time = timer.read();
-    std.debug.print("{s}\n", .{outstr});
-    std.debug.print("Program runtime: {d}\n", .{std.fmt.fmtDuration(end_time)});
-    eval.object_pool.free(allocator, output);
-    eval.deinit(allocator);
+    var compiler = try Compiler.create(allocator, &vm.memory);
+    try compiler.compile(&ast, 0);
+
+    try vm.run();
+
+    const sptr = vm.memory.stack_top() orelse 0;
+    const obj = vm.memory.memory.get(sptr);
+
+    const outstr = try vm.memory.ObjectToString(obj, &buffer);
+
+    len = outstr.len;
+
+    const stdout_file = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(stdout_file);
+    const stdout = bw.writer();
+    try stdout.print("{s}\n", .{buffer[0..len]});
+    try bw.flush();
 }
 
-const lexer = @import("tessel/lexer.zig");
 const Parser = @import("tessel/parser.zig");
 const Evaluator = @import("tessel/evaluator.zig");
-const ObjectPool = @import("tessel/object.zig");
-const Environment = @import("tessel/environment.zig");
-const IdentifierMap = @import("tessel/symbol_table.zig");
-const EnvironmentPool = @import("tessel/environment_pool.zig");
-const global_env = @import("tessel/environment_pool.zig").global_env;
+const Compiler = @import("tessel/compiler.zig");
+const ByteCode = @import("tessel/byte_code.zig");
+const VM = @import("tessel/vm.zig");
+const Memory = @import("tessel/memory.zig");
 const SymbolTree = @import("tessel/symbol_tree.zig");

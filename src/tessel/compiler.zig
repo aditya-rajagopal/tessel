@@ -302,7 +302,7 @@ fn compile_while_loop(self: *Compiler, ast: *const Ast, node: Ast.Node) Error!vo
     self.overwrite_jmp_pos(jn_pos, exit_pos);
     try self.emit(.leave_scope, &[_]u32{num_locals});
     for (0..self.break_locations.items.len - break_start) |_| {
-        const val = self.break_locations.pop();
+        const val = self.break_locations.pop() orelse unreachable;
         self.overwrite_jmp_pos(val, exit_pos);
     }
     // try self.emit(.lnull, &[_]u32{});
